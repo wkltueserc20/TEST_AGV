@@ -1,0 +1,171 @@
+.app-container {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  background-color: #f0f2f5;
+  color: #1a1a1a;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.sidebar {
+  width: 300px;
+  background-color: #ffffff;
+  padding: 20px;
+  border-right: 1px solid #dcdcdc;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 4px 0 10px rgba(0,0,0,0.05);
+  overflow-y: auto;
+  z-index: 10;
+}
+
+.section {
+  margin-bottom: 24px;
+  border-bottom: 1px solid #f0f0f0;
+  padding-bottom: 16px;
+}
+
+.section h3 {
+  font-size: 14px;
+  color: #555;
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.btn-group {
+  display: flex;
+  gap: 8px;
+}
+
+/* 強制所有按鈕的基本樣式 */
+button {
+  padding: 10px 16px;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff !important; /* 強制白色文字 */
+}
+
+button.primary {
+  background-color: #007bff;
+}
+
+button.primary:hover {
+  background-color: #0056b3;
+}
+
+button.warning {
+  background-color: #ff9800;
+  color: #ffffff !important;
+}
+
+button.danger {
+  background-color: #f44336;
+}
+
+button.secondary {
+  background-color: #495057; /* 深灰色背景 */
+  width: 100%;
+}
+
+button.secondary:hover {
+  background-color: #343a40;
+}
+
+.agv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.agv-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: #f8f9fa;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.agv-item.active {
+  background: #e7f1ff;
+  border-color: #007bff;
+  font-weight: bold;
+}
+
+.status-badge.online { background-color: #d4edda; color: #155724; }
+.status-badge.offline { background-color: #f8d7da; color: #721c24; }
+
+.list-container {
+  max-height: 250px;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+
+.list-item-detailed {
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 10px;
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  cursor: pointer;
+}
+
+.list-item-detailed.active {
+  background: #e7f1ff;
+  border-color: #007bff;
+}
+
+.item-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.small-del {
+  background: #dc3545;
+  color: white !important;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 12px;
+}
+
+.main-content {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background-color: #1a1a1a; /* 深色畫布背景 */
+  padding: 20px;
+}
+
+.hud-info {
+  margin-top: 16px;
+  color: #888;
+  font-size: 12px;
+}
+
+/* 狀態標籤 */
+.status-badge {
+  padding: 8px 12px;
+  border-radius: 20px;
+  font-weight: bold;
+  font-size: 13px;
+  margin-bottom: 20px;
+  text-align: center;
+}
