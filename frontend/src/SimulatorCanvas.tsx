@@ -18,29 +18,8 @@ const SimulatorCanvas: React.FC<Props> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
-  // 儲存所有 AGV 的顯示座標 (用於平滑推算)
+  // 顯示狀態：前端平滑插值後的座標
   const displayStates = useRef<Record<string, {x: number, y: number, theta: number, lastUpdate: number}>>({});
-
-  useEffect(() => {
-    if (!telemetry) return;
-    telemetry.agvs.forEach(a => {
-      if (!displayStates.current[a.id]) {
-        displayStates.current[a.id] = { x: a.x, y: a.y, theta: a.theta, lastUpdate: performance.now() };
-      } else {
-        const ds = displayStates.current[a.id];
-        const err = Math.sqrt((ds.x - a.x)**2 + (ds.y - a.y)**2);
-        if (err > 500 || !a.is_running) {
-          ds.x = a.x; ds.y = a.y; ds.theta = a.theta;
-        }
-        ds.lastUpdate = performance.now();
-      }
-    });
-    // 清理已刪除的 AGV
-    const currentIds = telemetry.agvs.map(a => a.id);
-    Object.keys(displayStates.current).forEach(id => {
-      if (!currentIds.includes(id)) delete displayStates.current[id];
-    });
-  }, [telemetry]);
 
   const worldToCanvas = useCallback((x: number, y: number, canvas: HTMLCanvasElement) => {
     const scale = canvas.width / MAP_SIZE;
@@ -59,22 +38,41 @@ const SimulatorCanvas: React.FC<Props> = ({
     if (!ctx) return;
 
     const now = performance.now();
+    const multiplier = (telemetry as any).multiplier || 10;
 
-    // 1. 物理推算
+    // --- 1. 平滑處理與預測 ---
     telemetry.agvs.forEach(a => {
+      if (!displayStates.current[a.id]) {
+        displayStates.current[a.id] = { x: a.x, y: a.y, theta: a.theta, lastUpdate: now };
+        return;
+      }
+
       const ds = displayStates.current[a.id];
-      if (ds && a.is_running) {
-        let dt = (now - ds.lastUpdate) / 1000.0;
-        dt = Math.min(dt, 0.1);
-        const simDt = dt * 10; // 對應後端倍率
+      const dt = (now - ds.lastUpdate) / 1000.0;
+      
+      if (a.is_running) {
+        // 先進行慣性預測
+        const simDt = dt * multiplier;
         ds.x += a.v * Math.cos(ds.theta) * simDt;
         ds.y += a.v * Math.sin(ds.theta) * simDt;
         ds.theta += a.omega * simDt;
-        ds.lastUpdate = now;
+
+        // 核心：平滑收斂 (追趕後端的真實座標，每幀修正 15%)
+        ds.x += (a.x - ds.x) * 0.15;
+        ds.y += (a.y - ds.y) * 0.15;
+        
+        let dTheta = a.theta - ds.theta;
+        while (dTheta > Math.PI) dTheta -= Math.PI * 2;
+        while (dTheta < -Math.PI) dTheta += Math.PI * 2;
+        ds.theta += dTheta * 0.15;
+      } else {
+        // 停止時快速同步
+        ds.x = a.x; ds.y = a.y; ds.theta = a.theta;
       }
+      ds.lastUpdate = now;
     });
 
-    // 2. 繪圖
+    // --- 2. 繪圖邏輯 ---
     ctx.fillStyle = '#f0f0f0';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -91,7 +89,7 @@ const SimulatorCanvas: React.FC<Props> = ({
 
     const scale = canvas.width / MAP_SIZE;
 
-    // 繪製路徑 (僅限選中的 AGV)
+    // 繪製路徑
     const selectedAgv = telemetry.agvs.find(a => a.id === selectedAgvId);
     if (selectedAgv?.path) {
       ctx.setLineDash([5, 5]);
@@ -158,8 +156,6 @@ const SimulatorCanvas: React.FC<Props> = ({
     const canvas = canvasRef.current; if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const { x, y } = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top, canvas);
-    
-    // 檢查是否點擊 AGV
     const clickedAgv = telemetry?.agvs.find(a => Math.sqrt((a.x-x)**2+(a.y-y)**2) < 1500);
     if (clickedAgv) onAgvSelect(clickedAgv.id);
     else onCanvasClick(x, y);

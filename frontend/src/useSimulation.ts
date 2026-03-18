@@ -1,16 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
 export interface AGVData {
-  id: string;
-  x: number;
-  y: number;
-  theta: number;
-  v: number;
-  omega: number;
-  l_rpm: number;
-  r_rpm: number;
-  max_rpm: number;
-  is_running: boolean;
+  id: string; x: number; y: number; theta: number;
+  v: number; omega: number;
+  l_rpm: number; r_rpm: number;
+  max_rpm: number; is_running: boolean;
   target: { x: number; y: number };
   path: [number, number][];
 }
@@ -18,36 +12,44 @@ export interface AGVData {
 export interface Telemetry {
   agvs: AGVData[];
   obstacles: any[];
+  multiplier: number;
 }
 
 export const useSimulation = (url: string) => {
   const [telemetry, setTelemetry] = useState<Telemetry | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const ws = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<number | null>(null);
+  const reconnectRef = useRef<number | null>(null);
 
   const connect = useCallback(() => {
-    if (ws.current) ws.current.close();
+    if (ws.current?.readyState === WebSocket.OPEN) return;
+
     const socket = new WebSocket(url);
     ws.current = socket;
+
     socket.onopen = () => setIsConnected(true);
-    socket.onmessage = (event) => {
+    socket.onmessage = (e) => {
       try {
-        const message = JSON.parse(event.data);
-        if (message.type === 'telemetry') setTelemetry(message.data);
-      } catch (e) { console.error("Parse error", e); }
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'telemetry') setTelemetry(msg.data);
+      } catch (err) { console.error(err); }
     };
-    socket.onclose = (event) => {
+    socket.onclose = () => {
       setIsConnected(false);
-      if (!event.wasClean) reconnectTimeoutRef.current = window.setTimeout(connect, 2000);
+      // 延遲重連
+      reconnectRef.current = window.setTimeout(connect, 3000);
     };
+    socket.onerror = () => socket.close();
   }, [url]);
 
   useEffect(() => {
     connect();
     return () => {
-      if (ws.current) ws.current.close(1000, "Unmount");
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      if (reconnectRef.current) clearTimeout(reconnectRef.current);
+      if (ws.current) {
+        ws.current.onclose = null;
+        ws.current.close();
+      }
     };
   }, [connect]);
 

@@ -99,19 +99,42 @@ button.secondary:hover {
   font-size: 13px;
 }
 
-.agv-item.active {
-  background: #e7f1ff;
-  border-color: #007bff;
-  font-weight: bold;
+.agv-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.status-badge.online { background-color: #d4edda; color: #155724; }
-.status-badge.offline { background-color: #f8d7da; color: #721c24; }
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  background: #f8f9fa;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #eee;
+}
 
-.list-container {
-  max-height: 250px;
-  overflow-y: auto;
-  margin-top: 8px;
+.tele-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.tele-item span { color: #666; }
+
+.item-coords {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.item-coords input {
+  width: 60px;
+  padding: 2px 4px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
 }
 
 .list-item-detailed {
