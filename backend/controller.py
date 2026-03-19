@@ -36,32 +36,35 @@ class AGVController:
         alpha = math.atan2(math.sin(target_angle - theta), math.cos(target_angle - theta))
         
         # --- 核心優化：外擺補償 (Swing-out) ---
-        # 如果正在轉彎 (alpha != 0)，我們將目標點向彎道外側偏移
-        # 補償量隨角度偏差增加，最大補償 150mm
         if abs(alpha) > 0.1:
-            # 計算垂直於目前車頭方向的外擺向量
-            # 如果 alpha > 0 (左轉)，外擺方向是右側 (-90度)
-            # 如果 alpha < 0 (右轉)，外擺方向是左側 (+90度)
             swing_dir = theta - (math.pi/2 if alpha > 0 else -math.pi/2)
             swing_offset = min(150.0, 300.0 * math.sin(abs(alpha)))
-            
-            # 修正後的目標點
             comp_target_x = target_wp[0] + math.cos(swing_dir) * swing_offset
             comp_target_y = target_wp[1] + math.sin(swing_dir) * swing_offset
-            
-            # 重新計算補償後的偏差角
             dx, dy = comp_target_x - x, comp_target_y - y
             distance = math.sqrt(dx**2 + dy**2)
             target_angle = math.atan2(dy, dx)
             alpha = math.atan2(math.sin(target_angle - theta), math.cos(target_angle - theta))
 
-        # --- 1. 原地旋轉 ---
-        if abs(alpha) > 0.4:
-            w = 1.5 if alpha > 0 else -1.5
-            if self.is_pose_safe(x, y, theta + w * 0.1, obstacles, margin=515):
-                return self.limit_physics(0.0, w, v_curr, omega_curr, max_speed)
-            else:
-                return self.limit_physics(-100.0, 0.0, v_curr, omega_curr, max_speed)
+        # --- 1. 原地旋轉 (方案 B & C) ---
+        # 如果速度很低 (剛起步或卡住)，啟動「無敵星模式」與「強制轉向」
+        if abs(v_curr) < 50.0:
+            if abs(alpha) > 0.4: # 超過 23 度強制轉正
+                w = 1.5 if alpha > 0 else -1.5
+                # 方案 B：放寬起步安全邊距到 502mm (1m 車體半寬 500mm + 2mm 極限餘裕)
+                # 讓 AGV 即使沒停正也能擠出空間旋轉
+                if self.is_pose_safe(x, y, theta + w * 0.1, obstacles, margin=502):
+                    return self.limit_physics(0.0, w, v_curr, omega_curr, max_speed)
+                else:
+                    return self.limit_physics(-100.0, 0.0, v_curr, omega_curr, max_speed)
+        else:
+            # 行進中的常規旋轉檢查
+            if abs(alpha) > 0.4:
+                w = 1.5 if alpha > 0 else -1.5
+                if self.is_pose_safe(x, y, theta + w * 0.1, obstacles, margin=515):
+                    return self.limit_physics(0.0, w, v_curr, omega_curr, max_speed)
+                else:
+                    return self.limit_physics(-100.0, 0.0, v_curr, omega_curr, max_speed)
 
         # --- 2. 精確追蹤 ---
         speed = max_speed * (math.cos(alpha) ** 2)

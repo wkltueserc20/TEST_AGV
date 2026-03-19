@@ -11,6 +11,7 @@ function App() {
   const [addAgvMode, setAddAgvMode] = useState(false);
   const [addMode, setAddMode] = useState<'rectangle' | 'circle'>('rectangle');
 
+  // 自動同步選中狀態：確保留有一台選中的 AGV
   useEffect(() => {
     if (telemetry?.agvs.length && !selectedAgvId) {
       setSelectedAgvId(telemetry.agvs[0].id);
@@ -23,7 +24,6 @@ function App() {
   const snapToCenter = (val: number) => Math.floor(val / 1000) * 1000 + 500;
   const snapToIntersection = (val: number) => Math.round(val / 1000) * 1000;
 
-  // 將弧度轉換為絕對度數 (0~359)
   const radToDeg = (rad: number) => {
     let deg = (rad * 180) / Math.PI;
     while (deg < 0) deg += 360;
@@ -37,22 +37,27 @@ function App() {
       setAddAgvMode(false);
       return;
     }
+
+    // 精確判定是否點中障礙物
     const clickedOb = telemetry.obstacles.find(ob => {
       if (ob.type === 'rectangle') return Math.abs(x - ob.x) <= 500 && Math.abs(y - ob.y) <= 500;
       return Math.sqrt((ob.x - x) ** 2 + (ob.y - y) ** 2) <= (ob.radius || 500);
     });
-    if (clickedOb) setSelectedObId(clickedOb.id);
-    else {
+
+    if (clickedOb) {
+      setSelectedObId(clickedOb.id);
+    } else {
+      // 點擊空白處：嘗試新增障礙物
       const sx = snapToCenter(x), sy = snapToCenter(y);
-      if (telemetry.obstacles.some(ob => ob.x === sx && ob.y === sy)) {
-        setSelectedObId(null);
-        return;
+      const isOccupied = telemetry.obstacles.some(ob => ob.x === sx && ob.y === sy);
+      
+      if (!isOccupied) {
+        const newOb = addMode === 'rectangle' 
+          ? { id: Math.random().toString(36).substr(2,9), type: 'rectangle', x: sx, y: sy, width: 1000, height: 1000, angle: 0 }
+          : { id: Math.random().toString(36).substr(2,9), type: 'circle', x: sx, y: sy, radius: 500 };
+        sendCommand('add_obstacle', { data: newOb });
       }
-      const newOb = addMode === 'rectangle' 
-        ? { id: Math.random().toString(36).substr(2,9), type: 'rectangle', x: sx, y: sy, width: 1000, height: 1000, angle: 0 }
-        : { id: Math.random().toString(36).substr(2,9), type: 'circle', x: sx, y: sy, radius: 500 };
-      sendCommand('add_obstacle', { data: newOb });
-      setSelectedObId(null);
+      setSelectedObId(null); // 取消障礙物選中
     }
   };
 
@@ -110,12 +115,12 @@ function App() {
               <div className="tele-item"><span>Y:</span><strong>{Math.round(selectedAgv.y)}</strong></div>
               <div className="tele-item"><span>Angle:</span><strong>{radToDeg(selectedAgv.theta)}°</strong></div>
               <div className="tele-item"><span>V:</span><strong>{Math.round(selectedAgv.v)}</strong></div>
-              <div className="tele-item" title="Left Motor RPM"><span>L:</span><strong style={{color: '#007bff'}}>{Math.round(selectedAgv.l_rpm)}</strong></div>
-              <div className="tele-item" title="Right Motor RPM"><span>R:</span><strong style={{color: '#28a745'}}>{Math.round(selectedAgv.r_rpm)}</strong></div>
+              <div className="tele-item"><span>L:</span><strong style={{color: '#007bff'}}>{Math.round(selectedAgv.l_rpm)}</strong></div>
+              <div className="tele-item"><span>R:</span><strong style={{color: '#28a745'}}>{Math.round(selectedAgv.r_rpm)}</strong></div>
             </div>
             
             <div style={{ marginTop: '15px' }}>
-              <label style={{ fontSize: '11px', color: '#666' }}>MAX SPEED: {selectedAgv.max_rpm} RPM</label>
+              <label style={{ fontSize: '11px', color: '#666' }}>MAX: {selectedAgv.max_rpm} RPM</label>
               <input type="range" min="0" max="3000" step="100" value={selectedAgv.max_rpm} 
                 onChange={(e) => sendCommand('set_speed', { agv_id: selectedAgvId, data: parseInt(e.target.value) })}
                 style={{ width: '100%' }} />
@@ -147,7 +152,7 @@ function App() {
               </div>
             ) : (
               <div style={{ textAlign: 'center', padding: '20px', background: '#f9f9f9', borderRadius: '4px', fontSize: '12px', color: '#999' }}>
-                Select an obstacle on map
+                Select obstacle to edit
               </div>
             )}
           </div>
@@ -162,7 +167,16 @@ function App() {
           selectedObstacleId={selectedObId}
           onCanvasClick={handleCanvasClick}
           onAgvSelect={setSelectedAgvId}
-          onCanvasRightClick={(x, y) => selectedAgvId && sendCommand('set_target', { agv_id: selectedAgvId, data: { x: snapToIntersection(x), y: snapToIntersection(y) } })}
+          onCanvasRightClick={(x, y) => {
+            // 核心修復：確保即便沒有選中，也至少對第一台 AGV 進行操作
+            const targetId = selectedAgvId || (telemetry?.agvs.length ? telemetry.agvs[0].id : null);
+            if (targetId) {
+              const sx = snapToIntersection(x);
+              const sy = snapToIntersection(y);
+              console.log(`Setting target for ${targetId} to ${sx}, ${sy}`);
+              sendCommand('set_target', { agv_id: targetId, data: { x: sx, y: sy } });
+            }
+          }}
         />
       </div>
     </div>

@@ -81,8 +81,16 @@ class AGV:
             d = (wp[0]-self.x)**2 + (wp[1]-self.y)**2
             if d < min_dist: min_dist = d; closest_idx = i
         
-        lookahead = max(1, int(2 + self.v / 150.0))
-        target_wp = self.global_path[min(closest_idx + lookahead, len(self.global_path)-1)]
+        # --- 方案 A：推遠起步前瞻點 ---
+        # 如果速度極低 (剛起步或卡住)，強制往前看至少 4 個點 (約 80cm)
+        # 這能避免因為距離 = 0 導致的角度除以零震盪
+        if abs(self.v) < 10.0:
+            lookahead = max(4, int(2 + self.v / 150.0))
+        else:
+            lookahead = max(1, int(2 + self.v / 150.0))
+            
+        target_idx = min(closest_idx + lookahead, len(self.global_path)-1)
+        target_wp = self.global_path[target_idx]
 
         # 核心：傳遞動態障礙物給控制器，實現即時避撞
         bv, bo = self.controller.compute_command(

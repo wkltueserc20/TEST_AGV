@@ -45,23 +45,33 @@ class AStarPlanner:
             return 0
 
         # --- A* 搜尋核心 ---
-        queue = [(0, start_grid)]
+        # 佇列結構改為 (Priority, H_cost, Node) 來防止 Python 使用 Node 座標進行偏見排序
+        queue = [(0, 0, start_grid)]
         came_from = {start_grid: None}
         cost_so_far = {start_grid: 0}
 
         while queue:
-            _, current = heapq.heappop(queue)
+            _, _, current = heapq.heappop(queue)
             if current == goal_grid: break
             for dx, dy in [(0,1),(0,-1),(1,0),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]:
                 neighbor = (current[0] + dx, current[1] + dy)
                 if 0 <= neighbor[0] < self.nodes_x and 0 <= neighbor[1] < self.nodes_y:
                     p = get_grid_penalty(neighbor[0], neighbor[1])
                     if p >= 1000000 and neighbor != goal_grid: continue
+                    
                     new_cost = cost_so_far[current] + math.sqrt(dx**2 + dy**2) * self.grid_size + p * 100
+                    
                     if neighbor not in cost_so_far or new_cost < cost_so_far[neighbor]:
                         cost_so_far[neighbor] = new_cost
-                        priority = new_cost + math.sqrt((goal_grid[0]-neighbor[0])**2 + (goal_grid[1]-neighbor[1])**2) * self.grid_size
-                        heapq.heappush(queue, (priority, neighbor))
+                        
+                        # Tie-Breaker 1: 優先選擇離目標更近的點
+                        h_cost = math.sqrt((goal_grid[0]-neighbor[0])**2 + (goal_grid[1]-neighbor[1])**2) * self.grid_size
+                        
+                        # Tie-Breaker 2: Heuristic Inflation (微幅放大預估值 0.1%)
+                        # 這會打破平手僵局，強迫演算法果斷朝目標前進，大幅減少擴展節點數，且消除方向性偏差
+                        priority = new_cost + h_cost * 1.001
+                        
+                        heapq.heappush(queue, (priority, h_cost, neighbor))
                         came_from[neighbor] = current
 
         if goal_grid not in came_from: return []
