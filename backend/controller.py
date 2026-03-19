@@ -28,16 +28,34 @@ class AGVController:
         return True
 
     def compute_command(self, x, y, theta, v_curr, omega_curr, target_wp, max_rpm, obstacles):
-        # 確保基準上限不超過 3000
-        safe_max_rpm = min(max_rpm, 3000.0)
-        max_speed = safe_max_rpm * self.rpm_to_mms
+        max_speed = min(max_rpm, 3000.0) * self.rpm_to_mms
         
         dx, dy = target_wp[0] - x, target_wp[1] - y
         distance = math.sqrt(dx**2 + dy**2)
         target_angle = math.atan2(dy, dx)
         alpha = math.atan2(math.sin(target_angle - theta), math.cos(target_angle - theta))
         
-        # 1. 原地旋轉
+        # --- 核心優化：外擺補償 (Swing-out) ---
+        # 如果正在轉彎 (alpha != 0)，我們將目標點向彎道外側偏移
+        # 補償量隨角度偏差增加，最大補償 150mm
+        if abs(alpha) > 0.1:
+            # 計算垂直於目前車頭方向的外擺向量
+            # 如果 alpha > 0 (左轉)，外擺方向是右側 (-90度)
+            # 如果 alpha < 0 (右轉)，外擺方向是左側 (+90度)
+            swing_dir = theta - (math.pi/2 if alpha > 0 else -math.pi/2)
+            swing_offset = min(150.0, 300.0 * math.sin(abs(alpha)))
+            
+            # 修正後的目標點
+            comp_target_x = target_wp[0] + math.cos(swing_dir) * swing_offset
+            comp_target_y = target_wp[1] + math.sin(swing_dir) * swing_offset
+            
+            # 重新計算補償後的偏差角
+            dx, dy = comp_target_x - x, comp_target_y - y
+            distance = math.sqrt(dx**2 + dy**2)
+            target_angle = math.atan2(dy, dx)
+            alpha = math.atan2(math.sin(target_angle - theta), math.cos(target_angle - theta))
+
+        # --- 1. 原地旋轉 ---
         if abs(alpha) > 0.4:
             w = 1.5 if alpha > 0 else -1.5
             if self.is_pose_safe(x, y, theta + w * 0.1, obstacles, margin=515):
@@ -45,7 +63,7 @@ class AGVController:
             else:
                 return self.limit_physics(-100.0, 0.0, v_curr, omega_curr, max_speed)
 
-        # 2. 精確追蹤
+        # --- 2. 精確追蹤 ---
         speed = max_speed * (math.cos(alpha) ** 2)
         if abs(alpha) > 0.2: speed = min(speed, 250.0) 
         speed = max(50.0, speed)
@@ -55,6 +73,7 @@ class AGVController:
         
         cmd_v, cmd_w = self.limit_physics(speed, omega, v_curr, omega_curr, max_speed)
         
+        # 安全層
         if self.is_path_safe(x, y, theta, cmd_v, cmd_w, obstacles):
             return cmd_v, cmd_w
             
@@ -70,23 +89,12 @@ class AGVController:
         return True
 
     def limit_physics(self, v, w, v_curr, w_curr, max_speed):
-        # 加速度限制
         v = np.clip(v, v_curr - self.max_accel * self.dt, v_curr + self.max_accel * self.dt)
         w = np.clip(w, w_curr - self.max_dyaw_rate * self.dt, w_curr + self.max_dyaw_rate * self.dt)
         
-        # --- 核心修正：左右輪絕對轉速限制 ---
-        # 計算左右輪在當前 (v, w) 下的物理速度
-        v_l = v - (w * self.wheel_base / 2.0)
-        v_r = v + (w * self.wheel_base / 2.0)
-        
-        # 找出最快那一輪的速度
+        v_l = v - (w * self.wheel_base / 2.0); v_r = v + (w * self.wheel_base / 2.0)
         max_wheel_v = max(abs(v_l), abs(v_r))
-        
-        # 如果最快那一輪超過了馬達物理上限 (max_speed)
         if max_wheel_v > max_speed:
-            # 等比例縮小 v 和 w，保證軌跡曲率不變，但單輪不超速
             ratio = max_speed / max_wheel_v
-            v *= ratio
-            w *= ratio
-            
+            v *= ratio; w *= ratio
         return v, w
