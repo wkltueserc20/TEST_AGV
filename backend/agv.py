@@ -38,6 +38,7 @@ class AGV:
     def _async_replan(self, obstacles):
         self.is_planning = True
         try:
+            # 規劃時考慮當前所有動態障礙物
             new_path = self.planner.get_path([self.x, self.y], [self.target["x"], self.target["y"]], obstacles)
             self.global_path = new_path
         finally:
@@ -49,45 +50,45 @@ class AGV:
 
         # 1. 觸發非同步重規劃
         if self.replan_needed and not self.is_planning:
-            thread = threading.Thread(target=self._async_replan, args=(list(world.obstacles),), daemon=True)
+            # 獲取包含其他 AGV 的最新快照
+            dynamic_obs = world.get_dynamic_obstacles(exclude_agv_id=self.id)
+            thread = threading.Thread(target=self._async_replan, args=(dynamic_obs,), daemon=True)
             thread.start()
 
-        # 2. 核心優化：即時旋轉響應 (先轉再說)
-        # 如果正在規劃路徑，且目標在車頭 45 度以外，先執行原地旋轉
+        # 2. 如果正在規劃，嘗試原地轉向對準目標，不移動
         if self.is_planning:
             dx, dy = self.target["x"] - self.x, self.target["y"] - self.y
             target_angle = math.atan2(dy, dx)
             alpha = math.atan2(math.sin(target_angle - self.theta), math.cos(target_angle - self.theta))
-            
-            if abs(alpha) > 0.4: # 大於 23 度就啟動預轉向
+            if abs(alpha) > 0.4:
                 w = 1.2 if alpha > 0 else -1.2
-                # 旋轉安全檢查
                 if self.controller.is_pose_safe(self.x, self.y, self.theta + w * 0.1, world.obstacles, margin=515):
                     self.v = 0
-                    self.omega = np.clip(w, self.omega - 5.0*dt, self.omega + 5.0*dt) # 加速度限制
+                    self.omega = np.clip(w, self.omega - 5.0*dt, self.omega + 5.0*dt)
                     self.x, self.y, self.theta = self.kinematics.update_pose(self.x, self.y, self.theta, self.v, self.omega, dt)
                     self.l_rpm, self.r_rpm = self.kinematics.velocity_to_rpm(self.v, self.omega)
                     return
-            
-            # 如果不適合旋轉或角度已對準，則保持靜止等待 A*
-            self.v = 0; self.omega = 0
-            self.l_rpm, self.r_rpm = 0, 0
-            return
+            self.v = 0; self.omega = 0; return
 
-        # 3. 正常追蹤邏輯 (A* 算完後銜接)
         if not self.global_path: return
 
-        min_dist = float("inf")
-        closest_idx = 0
+        # 3. 獲取動態障礙物 (包含其他正在移動的 AGV)
+        dynamic_obs = world.get_dynamic_obstacles(exclude_agv_id=self.id)
+
+        # 4. 尋找最近點並執行控制
+        min_dist = float("inf"); closest_idx = 0
         for i, wp in enumerate(self.global_path):
             d = (wp[0]-self.x)**2 + (wp[1]-self.y)**2
             if d < min_dist: min_dist = d; closest_idx = i
         
-        lookahead_steps = max(1, int(2 + self.v / 150.0))
-        target_idx = min(closest_idx + lookahead_steps, len(self.global_path)-1)
-        target_wp = self.global_path[target_idx]
+        lookahead = max(1, int(2 + self.v / 150.0))
+        target_wp = self.global_path[min(closest_idx + lookahead, len(self.global_path)-1)]
 
-        bv, bo = self.controller.compute_command(self.x, self.y, self.theta, self.v, self.omega, target_wp, self.max_rpm, world.obstacles)
+        # 核心：傳遞動態障礙物給控制器，實現即時避撞
+        bv, bo = self.controller.compute_command(
+            self.x, self.y, self.theta, self.v, self.omega, 
+            target_wp, self.max_rpm, dynamic_obs
+        )
 
         self.v, self.omega = bv, bo
         self.x, self.y, self.theta = self.kinematics.update_pose(self.x, self.y, self.theta, self.v, self.omega, dt)

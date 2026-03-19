@@ -1,102 +1,58 @@
-# 兩輪差速 AGV 路徑規劃模擬器 (V2 Pro 版)
+# 多機差速 AGV 高精模擬器 (V5.1 Pro)
 
-這是一個高效、流暢且具備智慧避障能力的 AGV (Automated Guided Vehicle) 模擬系統。採用 **Python FastAPI** 作為運算後端，配合 **React (TypeScript)** 作為可視化前端，實作了工業級的 **DWA (Dynamic Window Approach)** 局部路徑規劃演算法。
+這是一個工業級的高精度多機 AGV (Automated Guided Vehicle) 模擬系統。採用 **Python FastAPI** 作為運算後端，配合 **React (TypeScript)** 作為可視化前端，實作了結合 **物理勢場 A*** 與 **動態 DWA** 的混合導航架構。
 
-![AGV Simulation](https://img.shields.io/badge/Version-2.0-blue)
-![Tech Stack](https://img.shields.io/badge/FastAPI-NumPy-green)
-![Tech Stack](https://img.shields.io/badge/React-TypeScript-blue)
+![AGV Simulation](https://img.shields.io/badge/Version-5.1-green)
+![Architecture](https://img.shields.io/badge/Architecture-OOP--Async-orange)
+![Performance](https://img.shields.io/badge/Performance-60FPS--Smooth-blue)
 
 ## 🚀 核心特色
 
-### 1. 絲滑的預測渲染 (Predictive Rendering)
-採用 **航位推算 (Dead Reckoning)** 技術。前端不再單純依賴後端傳來的座標繪圖，而是根據速度向量即時推算每一幀的位置，達成絲綢般流暢的 60FPS 動畫效果，完全消除網路延遲造成的跳動感。
+### 1. V5.1 極致流暢引擎 (High-Performance Engine)
+針對大規模長路徑模擬進行了深度優化：
+- **前端 60FPS 零卡頓**：修正了 `requestAnimationFrame` 記憶體洩漏，採用單一繪圖循環技術，支援長時間連續運行不掉幀。
+- **非同步路徑規劃**：路徑搜尋在背景線程執行，按下 Start 瞬間立即原地轉向響應，物理引擎與通訊層永不阻塞。
 
-### 2. 高效雙執行緒架構 (Multi-threaded Backend)
-後端將「通訊層」與「物理引擎」完全分離：
-- **通訊執行緒**：負責 WebSocket 訊息收發，保證 UI 指令（Start/Pause）零延遲回應。
-- **物理執行緒**：獨立運行 DWA 運算與運動學模擬，確保運算壓力不影響連線穩定性。
+### 2. V5.0+ 多機協同與避障 (Multi-AGV Coordination)
+- **全場域互感應**：AGV 之間能實時感知彼此位置，並自動將其他車輛視為動態圓形障礙物。
+- **物理勢場 A***：路徑會根據兩側牆壁壓力自動尋找力量平衡的「中心中線」，並透過「雙重移動平均」生成平滑的圓弧轉彎軌跡。
+- **外擺補償 (Swing-out)**：轉彎時自動補償內外輪差，確保 1m 車體在 2m 通道中完美過彎。
 
-### 3. 工業級 DWA 避障演算法
-- **動態權重切換**：在開闊地帶全速衝刺，在狹窄區域（如 2m 寬門）自動切換至安全模式。
-- **智能脫困**：當陷入死胡同或障礙物包圍時，會自動進行「雷達掃描」尋找最空曠的角度並平滑轉向。
-- **物理參數**：模擬 1m x 1m 車體，支援高達 3000 RPM (600mm/s) 的運動表現。
+### 3. 高精度物理模擬 (Industrial-Grade Physics)
+- **100Hz 子步進積分**：內部物理週期達 10ms，徹底消除高倍速模擬下的積分漂移。
+- **嚴格 RPM 限制**：鎖定 3000 RPM (600mm/s) 物理極限，具備單輪超速保護與動態加速度限制。
+- **動態倍率**：支援 1x ~ 15x 模擬加速，方便快速驗證不同場景下的演算法表現。
 
-## 🛠 技術棧
+## ⚙️ 快速啟動 (Windows)
 
-- **後端 (Backend)**: 
-  - Python 3.13+
-  - **FastAPI / Uvicorn**: 非同步 Web 服務與 WebSockets 通訊。
-  - **NumPy**: 高效矩陣運算。
-  - **Shapely**: 精確的幾何碰撞偵測。
-- **前端 (Frontend)**:
-  - React 18 / Vite / TypeScript
-  - **HTML5 Canvas**: 50m x 50m 大地圖即時繪製。
-  - **WebSocket**: 雙向實時數據同步。
-
-## 📋 系統規格
-
-- **地圖尺寸**: 50,000mm x 50,000mm (50m x 50m)。
-- **座標系統**: 笛卡兒座標系 (左下角為 0,0)。
-- **AGV 尺寸**: 1,000mm x 1,000mm。
-- **速度上限**: 3000 RPM (約 600 mm/s)。
-- **模擬倍率**: 支援 10x ~ 50x 加速預覽 (預設穩定值為 15x)。
-
-## ⚙️ 安裝與啟動
-
-### 1. 下載專案
-```bash
-git clone <your-repo-url>
-cd <project-folder>
-```
-
-### 2. 快速啟動 (Windows)
-專案內建了一鍵啟動腳本：
+專案內建了一鍵啟動腳本，會自動初始化環境並啟動服務：
 ```powershell
 .\start.ps1
-```
-*這會自動初始化後端 Python 環境與前端依賴，並開啟兩個視窗運行服務。*
-
-### 3. 手動啟動
-**後端**:
-```bash
-cd backend
-python -m venv venv
-.\venv\Scripts\activate
-pip install fastapi uvicorn numpy shapely websockets
-python main.py
-```
-**前端**:
-```bash
-cd frontend
-npm install
-npm run dev
 ```
 
 ## 🎮 操作說明
 
-- **左鍵點擊**: 在地圖上新增障礙物 (預設 1m x 1m 正方形)。
-- **右鍵點擊**: 設定 AGV 的 **目標 B 點**。
-- **側邊欄管理**:
-  - 調整 **Speed Limit**：即時改變馬達極限轉速。
-  - **座標編輯**：直接輸入數值精確移動障礙物位置。
-  - **即時遙測**：查看實時 X, Y, V, ω, RPM 等數值。
-- **Delete 鍵**: 刪除選中的障礙物。
+- **左鍵點擊**：點擊空白處「新增」障礙物（吸附於網格）；點擊障礙物「選取」編輯。
+- **右鍵點擊**：設定選中 AGV 的 **目標 B 點**（自動吸附於格線交點）。
+- **側邊欄管理**：
+  - **模擬速度**：切換 1x ~ 15x 運行速度。
+  - **Fleet Management**：管理多台 AGV 狀態。
+  - **即時遙測**：觀察座標、絕對角度與左右輪即時 RPM。
+- **自動存檔**：場景佈置會自動序列化至 `backend/obstacles.json`。
 
----
-
-## 📄 專案結構
+## 📄 技術架構
 
 ```text
 ├── backend/
-│   ├── main.py         # FastAPI 伺服器與雙執行緒調度
-│   ├── dwa.py          # DWA 避障演算法核心
-│   ├── kinematics.py   # 兩輪差速運動學模型
-│   └── venv/           # Python 虛擬環境
+│   ├── world.py        # 世界引擎：管理邊界、障礙物與多機同步
+│   ├── agv.py          # AGV 實體：自治導航與非同步規劃邏輯
+│   ├── planner.py      # 高解析度勢場 A* 規劃器
+│   ├── controller.py   # 具備外擺補償與安全護盾的局部控制器
+│   ├── main.py         # FastAPI 伺服器與倍率調度
+│   └── obstacles.json  # 場景存檔
 ├── frontend/
 │   ├── src/
-│   │   ├── App.tsx             # UI 佈局與狀態管理
-│   │   ├── SimulatorCanvas.tsx # 60FPS 預測渲染畫布
-│   │   └── useSimulation.ts    # WebSocket 客戶端 Hook
-│   └── ...
-└── start.ps1           # 一鍵啟動腳本
+│   │   ├── SimulatorCanvas.tsx # 高效能 60FPS 渲染引擎
+│   │   └── App.tsx             # 專注編輯模式 UI
+└── start.ps1           # 自動化啟動腳本
 ```
