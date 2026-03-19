@@ -57,14 +57,14 @@ const SimulatorCanvas: React.FC<Props> = ({
         ds.y += a.v * Math.sin(ds.theta) * simDt;
         ds.theta += a.omega * simDt;
 
-        // 核心：平滑收斂 (追趕後端的真實座標，每幀修正 15%)
-        ds.x += (a.x - ds.x) * 0.15;
-        ds.y += (a.y - ds.y) * 0.15;
+        // 降低預測權重 (每幀修正 5%)，減少「先衝牆再拉回」的視覺誤差
+        ds.x += (a.x - ds.x) * 0.05;
+        ds.y += (a.y - ds.y) * 0.05;
         
         let dTheta = a.theta - ds.theta;
         while (dTheta > Math.PI) dTheta -= Math.PI * 2;
         while (dTheta < -Math.PI) dTheta += Math.PI * 2;
-        ds.theta += dTheta * 0.15;
+        ds.theta += dTheta * 0.05;
       } else {
         // 停止時快速同步
         ds.x = a.x; ds.y = a.y; ds.theta = a.theta;
@@ -76,9 +76,9 @@ const SimulatorCanvas: React.FC<Props> = ({
     ctx.fillStyle = '#f0f0f0';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // 格線
+    // 格線 (1m x 1m)
     ctx.strokeStyle = '#ccc';
-    for (let i = 0; i <= MAP_SIZE; i += 5000) {
+    for (let i = 0; i <= MAP_SIZE; i += 1000) {
       const p1 = worldToCanvas(i, 0, canvas);
       const p2 = worldToCanvas(i, MAP_SIZE, canvas);
       ctx.beginPath(); ctx.moveTo(p1.cx, p1.cy); ctx.lineTo(p2.cx, p2.cy); ctx.stroke();
