@@ -7,6 +7,7 @@ interface Props {
   selectedObstacleId: string | null;
   showSearch: boolean;
   onCanvasClick: (x: number, y: number) => void;
+  onCanvasDoubleClick: (x: number, y: number) => void; // 新增雙擊回調
   onCanvasRightClick: (x: number, y: number) => void;
   onAgvSelect: (id: string) => void;
 }
@@ -16,16 +17,14 @@ const GRID_SIZE = 200;
 
 const SimulatorCanvas: React.FC<Props> = ({ 
   telemetry, selectedAgvId, selectedObstacleId, showSearch,
-  onCanvasClick, onCanvasRightClick, onAgvSelect 
+  onCanvasClick, onCanvasDoubleClick, onCanvasRightClick, onAgvSelect 
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  
   const telemetryRef = useRef<Telemetry | null>(null);
   const selectedAgvIdRef = useRef<string | null>(null);
   const selectedObstacleIdRef = useRef<string | null>(null);
   
   const revealedIndices = useRef<Record<string, number>>({});
-  // 核心修正：儲存特徵值而非陣列對象，避免引用造成的閃爍
   const lastSearchFingerprints = useRef<Record<string, string>>({});
 
   useEffect(() => { telemetryRef.current = telemetry; }, [telemetry]);
@@ -84,19 +83,14 @@ const SimulatorCanvas: React.FC<Props> = ({
         ds.lastUpdate = now;
       }
 
-      // --- 核心修正：播放進度管理 ---
       if (a.visited && a.visited.length > 0) {
-        // 使用首尾座標與長度作為特徵值
         const first = a.visited[0], last = a.visited[a.visited.length - 1];
         const fingerprint = `${a.visited.length}-${first[0]},${first[1]}-${last[0]},${last[1]}`;
-        
         if (fingerprint !== lastSearchFingerprints.current[a.id]) {
             revealedIndices.current[a.id] = 0;
             lastSearchFingerprints.current[a.id] = fingerprint;
         }
-        
         if (revealedIndices.current[a.id] < a.visited.length) {
-            // 每幀揭露的點數，設為 50 讓流水感更明顯
             revealedIndices.current[a.id] += 50;
         }
       }
@@ -117,13 +111,11 @@ const SimulatorCanvas: React.FC<Props> = ({
 
     const scale = canvas.width / MAP_SIZE;
 
-    // 繪製 A* 搜尋雲 (流水效果)
     const selectedAgv = currentTelemetry.agvs.find(a => a.id === currentSelectedAgvId);
     if (showSearch && selectedAgv?.visited) {
         ctx.fillStyle = 'rgba(0, 123, 255, 0.25)';
         const blockSize = GRID_SIZE * scale;
         const count = revealedIndices.current[selectedAgv.id] || 0;
-        
         for (let i = 0; i < Math.min(count, selectedAgv.visited.length); i++) {
             const node = selectedAgv.visited[i];
             const { cx, cy } = worldToCanvas(node[0] * GRID_SIZE, node[1] * GRID_SIZE, canvas);
@@ -163,10 +155,8 @@ const SimulatorCanvas: React.FC<Props> = ({
       const { cx, cy } = worldToCanvas(ds.x, ds.y, canvas);
       const agvSize = 1000 * scale;
       const goal = worldToCanvas(a.target.x, a.target.y, canvas);
-      
       ctx.fillStyle = a.id === currentSelectedAgvId ? '#28a745' : '#aaa';
       ctx.beginPath(); ctx.arc(goal.cx, goal.cy, 6, 0, 2*Math.PI); ctx.fill();
-
       ctx.save();
       ctx.translate(cx, cy);
       ctx.rotate(-ds.theta);
@@ -199,16 +189,28 @@ const SimulatorCanvas: React.FC<Props> = ({
     else onCanvasClick(x, y);
   };
 
+  const handleDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current; if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const { x, y } = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top, canvas);
+    onCanvasDoubleClick(x, y);
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-      <canvas ref={canvasRef} width={750} height={750} style={{ border: '2px solid #333', background: '#1a1a1a', cursor: 'crosshair' }} onClick={handleClick} onContextMenu={(e) => {
-        e.preventDefault();
-        const rect = canvasRef.current?.getBoundingClientRect();
-        if (rect) {
-          const { x, y } = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top, canvasRef.current!);
-          onCanvasRightClick(x, y);
-        }
-      }} />
+      <canvas ref={canvasRef} width={750} height={750} 
+        style={{ border: '2px solid #333', background: '#1a1a1a', cursor: 'crosshair' }} 
+        onClick={handleClick} 
+        onDoubleClick={handleDoubleClick}
+        onContextMenu={(e) => {
+            e.preventDefault();
+            const rect = canvasRef.current?.getBoundingClientRect();
+            if (rect) {
+                const { x, y } = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top, canvasRef.current!);
+                onCanvasRightClick(x, y);
+            }
+        }} 
+      />
     </div>
   );
 };

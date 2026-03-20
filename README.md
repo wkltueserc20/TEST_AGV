@@ -2,15 +2,19 @@
 
 這是一個工業級的高精度多機 AGV (Automated Guided Vehicle) 模擬系統。採用 **Python FastAPI** 作為運算後端，配合 **React (TypeScript)** 作為可視化前端，實作了結合 **物理勢場 A*** 與 **動態 DWA** 的混合導航架構。
 
-![AGV Simulation](https://img.shields.io/badge/Version-5.3-green)
-![Architecture](https://img.shields.io/badge/Architecture-OOP--Async-orange)
-![Performance](https://img.shields.io/badge/Performance-60FPS--Smooth-blue)
+![AGV Simulation](https://img.shields.io/badge/Version-5.6-green)
+![Architecture](https://img.shields.io/badge/Architecture-Async--Queue-orange)
+![Performance](https://img.shields.io/badge/Performance-Ultra--Responsive-blue)
 
 ## 🚀 核心特色
 
-### 1. V5.3 A* 搜尋視覺化 (Search Debugger)
-- **思考過程可見化**：新增「Show A* Search Process」開關，以流水感動畫展示演算法的擴散過程與避障策略。
-- **效能極速優化**：引進預處理代價地圖（Costmap），搜尋速度提升 100 倍，支援複雜場景即時規劃。
+### 1. V5.6 非同步響應引擎 (Async Engine)
+- **零阻塞操作**：障礙物刪除、清除與 F5 重新整理均實現了非同步處理。重型運算在地圖背景執行緒完成，UI 隨時保持即時響應。
+- **雙擊快速互動**：新增「雙擊刪除障礙物」功能，大幅提升場景佈置效率。
+
+### 2. 極致效能與視覺化
+- **100x 規劃加速**：採用預處理代價地圖（Static Costmap），複雜路徑瞬間生成。
+- **A* 搜尋可見化**：動態展示搜尋過程，支援逐格流水重播，是演算法除錯的最佳利器。
 
 ### 2. V5.0+ 多機協同與避障 (Multi-AGV Coordination)
 - **全場域互感應**：AGV 之間能實時感知彼此位置，並自動將其他車輛視為動態圓形障礙物。

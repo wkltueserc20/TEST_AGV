@@ -2,6 +2,7 @@ import math
 import json
 import os
 import logging
+import threading
 import numpy as np
 from typing import List, Dict, Any
 
@@ -15,11 +16,14 @@ class World:
         self.agvs: Dict[str, Any] = {}
         self.storage_file = "obstacles.json"
         
-        # 效能優化：預處理代價地圖 (解析度 200mm)
         self.grid_res = 200.0
         self.nx = int(width // self.grid_res)
         self.ny = int(height // self.grid_res)
-        self.static_costmap = None # 會在 load_obstacles 後計算
+        
+        self.static_costmap = np.zeros((self.nx, self.ny))
+        self._map_lock = threading.Lock()
+        self._is_updating = False
+        self._needs_recompute = False # 記錄是否在計算中又有新的變動
         
         self.load_obstacles()
 
@@ -27,7 +31,7 @@ class World:
         try:
             with open(self.storage_file, 'w', encoding='utf-8') as f:
                 json.dump(self.obstacles, f, indent=2)
-            self.update_static_costmap() # 每次儲存後更新地圖
+            self.update_static_costmap()
         except Exception as e:
             logger.error(f"Failed to save obstacles: {e}")
 
@@ -36,73 +40,90 @@ class World:
             try:
                 with open(self.storage_file, 'r', encoding='utf-8') as f:
                     self.obstacles = json.load(f)
+                for i, ob in enumerate(self.obstacles):
+                    if not ob.get("id"):
+                        ob["id"] = f"ob-{i}-{int(ob['x'])}-{int(ob['y'])}"
             except Exception as e:
                 logger.error(f"Failed to load obstacles: {e}")
                 self.obstacles = []
         self.update_static_costmap()
 
     def update_static_costmap(self):
-        """
-        預計算靜態障礙物的勢場代價。
-        這讓 A* 搜尋從 O(N*M) 變為 O(N) 的查表運算。
-        """
-        logger.info("Computing static costmap...")
-        # 初始化為邊界斥力
-        costmap = np.zeros((self.nx, self.ny))
+        """觸發地圖重算，支援併發請求"""
+        if self._is_updating:
+            # 如果正在算，標記「算完後要再算一次最新版」
+            self._needs_recompute = True
+            return
         
-        # 預處理障礙物邊界以加快內部循環
-        obs_rects = []
-        for ob in self.obstacles:
-            if ob['type'] == 'rectangle':
-                w, h = ob.get('width', 1000), ob.get('height', 1000)
-                obs_rects.append((ob['x'] - w/2, ob['y'] - h/2, ob['x'] + w/2, ob['y'] + h/2))
-        
-        for gx in range(self.nx):
-            wx = gx * self.grid_res
-            for gy in range(self.ny):
-                wy = gy * self.grid_res
-                
-                # 1. 邊界距離
-                min_d = min(wx, self.width - wx, wy, self.height - wy)
-                
-                # 2. 靜態障礙物距離
-                for r in obs_rects:
-                    dx = max(r[0] - wx, 0, wx - r[2])
-                    dy = max(r[1] - wy, 0, wy - r[3])
-                    d = math.sqrt(dx**2 + dy**2)
-                    if d < min_d: min_d = d
-                
-                # 3. 計算代價 (使用與 Planner 一致的公式)
-                if min_d < 550: 
-                    costmap[gx, gy] = 1000000.0
-                elif min_d < 2000:
-                    costmap[gx, gy] = (2000.0 / min_d) ** 4
+        self._needs_recompute = False
+        current_obs = list(self.obstacles)
+        thread = threading.Thread(target=self._compute_costmap_task, args=(current_obs,), daemon=True)
+        thread.start()
+
+    def _compute_costmap_task(self, obs_list):
+        self._is_updating = True
+        try:
+            new_map = np.zeros((self.nx, self.ny))
+            obs_geoms = []
+            for ob in obs_list:
+                if ob['type'] == 'rectangle':
+                    w, h = ob.get('width', 1000), ob.get('height', 1000)
+                    obs_geoms.append(('rect', ob['x'] - w/2, ob['y'] - h/2, ob['x'] + w/2, ob['y'] + h/2))
                 else:
-                    costmap[gx, gy] = 0
-        
-        self.static_costmap = costmap
-        logger.info("Static costmap update complete.")
+                    obs_geoms.append(('circle', ob['x'], ob['y'], ob.get('radius', 500)))
+            
+            for gx in range(self.nx):
+                wx = gx * self.grid_res
+                for gy in range(self.ny):
+                    wy = gy * self.grid_res
+                    min_d = min(wx, self.width - wx, wy, self.height - wy)
+                    for kind, *data in obs_geoms:
+                        if kind == 'rect':
+                            dx = max(data[0] - wx, 0, wx - data[2])
+                            dy = max(data[1] - wy, 0, wy - data[3])
+                            d = math.sqrt(dx**2 + dy**2)
+                        else:
+                            d = math.sqrt((data[0] - wx)**2 + (data[1] - wy)**2) - data[2]
+                        if d < min_d: min_d = d
+                    if min_d < 550: new_map[gx, gy] = 1000000.0
+                    elif min_d < 2000: new_map[gx, gy] = (2000.0 / min_d) ** 4
+            
+            with self._map_lock:
+                self.static_costmap = new_map
+            logger.info("Costmap computation complete.")
+        except Exception as e:
+            logger.error(f"Costmap failed: {e}")
+        finally:
+            self._is_updating = False
+            # 核心修正：如果計算期間又有新變動，立刻再啟動一輪
+            if self._needs_recompute:
+                self.update_static_costmap()
 
     def add_obstacle(self, ob: Dict[str, Any]):
         self.obstacles.append(ob); self.save_obstacles()
 
     def remove_obstacle(self, ob_id: str):
-        self.obstacles = [o for o in self.obstacles if o.get("id") != ob_id]; self.save_obstacles()
+        # 修正：更安全的 ID 比對
+        if not ob_id: return
+        original_count = len(self.obstacles)
+        self.obstacles = [o for o in self.obstacles if str(o.get("id")) != str(ob_id)]
+        if len(self.obstacles) < original_count:
+            logger.info(f"Obstacle {ob_id} removed from data list.")
+            self.save_obstacles()
 
     def update_obstacle(self, ob_data: Dict[str, Any]):
         for ob in self.obstacles:
-            if ob.get("id") == ob_data.get("id"):
+            if str(ob.get("id")) == str(ob_data.get("id")):
                 ob.update(ob_data); break
         self.save_obstacles()
 
     def clear_obstacles(self):
-        self.obstacles = []; self.save_obstacles()
+        self.obstacles = []
+        self.save_obstacles()
 
     def get_dynamic_obstacles(self, exclude_agv_id: str) -> List[Dict[str, Any]]:
-        dyn_obs = [] # 這裡只回傳其他 AGV，因為靜態障礙物已在 costmap 中
+        dyn_obs = []
         for oid, o_agv in self.agvs.items():
             if oid != exclude_agv_id:
-                dyn_obs.append({
-                    "id": oid, "type": "circle", "x": o_agv.x, "y": o_agv.y, "radius": 850.0 
-                })
+                dyn_obs.append({"id": oid, "type": "circle", "x": o_agv.x, "y": o_agv.y, "radius": 850.0})
         return dyn_obs

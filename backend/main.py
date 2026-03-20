@@ -18,9 +18,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# 全域模擬倍率，預設 1x
 SIM_MULTIPLIER = 1
-
 world = World()
 world_lock = threading.Lock()
 cmd_queue = queue.Queue()
@@ -66,13 +64,14 @@ async def websocket_endpoint(websocket: WebSocket):
 def process_commands():
     global SIM_MULTIPLIER
     while not cmd_queue.empty():
+        msg = cmd_queue.get_nowait()
+        t = msg.get("type")
+        target_id = msg.get("agv_id")
+        
         try:
-            msg = cmd_queue.get_nowait()
-            t, target_id = msg.get("type"), msg.get("agv_id")
             with world_lock:
                 if t == "set_multiplier":
                     SIM_MULTIPLIER = int(msg.get("data", 1))
-                    logger.info(f"Simulation speed set to {SIM_MULTIPLIER}x")
                 elif t == "add_agv":
                     new_id = f"AGV-{str(uuid.uuid4())[:4].upper()}"
                     world.agvs[new_id] = AGV(new_id, msg.get("x", 5000), msg.get("y", 5000))
@@ -86,8 +85,11 @@ def process_commands():
                     world.clear_obstacles()
                     for a in world.agvs.values(): a.replan_needed = True
                 elif t == "remove_obstacle":
-                    world.remove_obstacle(msg.get("id"))
-                    for a in world.agvs.values(): a.replan_needed = True
+                    # 容錯解析 ID
+                    ob_id = msg.get("id") or (msg.get("data") if not isinstance(msg.get("data"), dict) else msg.get("data").get("id"))
+                    if ob_id:
+                        world.remove_obstacle(str(ob_id))
+                        for a in world.agvs.values(): a.replan_needed = True
                 elif target_id and target_id in world.agvs:
                     a = world.agvs[target_id]
                     if t == "start": a.is_running = True; a.replan_needed = True
@@ -101,23 +103,20 @@ def process_commands():
                         a.target = msg.get("data"); a.replan_needed = True
                     elif t == "set_speed":
                         a.max_rpm = float(msg.get("data", 3000))
-        except: break
+        except Exception as e:
+            logger.error(f"Error processing command {t}: {e}")
 
 def physics_engine_thread():
     dt = 0.1
-    sub_dt = 0.01 # 100Hz 物理積分確保高倍速下的穩定性
-    
+    sub_dt = 0.01 
     while True:
         cycle_start = time.time()
         process_commands()
-
         with world_lock:
-            # 物理引擎根據 SIM_MULTIPLIER 重複執行子步進
             for _ in range(SIM_MULTIPLIER):
-                for _sub in range(10): # 每次 dt 內做 10 次積分
+                for _sub in range(10): 
                     for a in world.agvs.values():
                         a.update(sub_dt, world)
-
         elapsed = time.time() - cycle_start
         if dt > elapsed:
             time.sleep(dt - elapsed)
