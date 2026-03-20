@@ -10,6 +10,7 @@ function App() {
   const [selectedObId, setSelectedObId] = useState<string | null>(null);
   const [addAgvMode, setAddAgvMode] = useState(false);
   const [addMode, setAddMode] = useState<'rectangle' | 'circle'>('rectangle');
+  const [showSearch, setShowSearch] = useState(true);
 
   // 自動同步選中狀態：確保留有一台選中的 AGV
   useEffect(() => {
@@ -82,18 +83,27 @@ function App() {
               <button key={m} className={telemetry?.multiplier === m ? 'primary active' : 'secondary'} onClick={() => sendCommand('set_multiplier', { data: m })}>{m}x</button>
             ))}
           </div>
+          <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <input type="checkbox" id="show-search" checked={showSearch} onChange={(e) => setShowSearch(e.target.checked)} />
+            <label htmlFor="show-search" style={{ fontSize: '12px', cursor: 'pointer' }}>Show A* Search Process</label>
+          </div>
         </div>
 
         <div className="section">
           <h3>Fleet Management</h3>
-          <div className="agv-list">
             {telemetry?.agvs.map(a => (
               <div key={a.id} className={`agv-item ${selectedAgvId === a.id ? 'active' : ''}`} onClick={() => setSelectedAgvId(a.id)}>
-                <div className="agv-item-info"><strong>{a.id}</strong></div>
+                <div className="agv-item-info">
+                  <strong>{a.id}</strong>
+                  {a.is_planning ? (
+                    <span style={{ fontSize: '10px', color: '#ffc107', fontWeight: 'bold' }}>PLANNING...</span>
+                  ) : (
+                    <span style={{ fontSize: '10px', opacity: 0.7 }}>{a.is_running ? 'RUNNING' : 'IDLE'}</span>
+                  )}
+                </div>
                 <button className="small-del" onClick={(e) => { e.stopPropagation(); sendCommand('remove_agv', { agv_id: a.id }); }}>×</button>
               </div>
             ))}
-          </div>
           <button className={addAgvMode ? 'warning' : 'primary'} style={{ width: '100%', marginTop: '10px' }} onClick={() => setAddAgvMode(!addAgvMode)}>
             {addAgvMode ? 'CANCEL' : '+ ADD AGV'}
           </button>
@@ -165,6 +175,7 @@ function App() {
           telemetry={telemetry} 
           selectedAgvId={selectedAgvId}
           selectedObstacleId={selectedObId}
+          showSearch={showSearch}
           onCanvasClick={handleCanvasClick}
           onAgvSelect={setSelectedAgvId}
           onCanvasRightClick={(x, y) => {

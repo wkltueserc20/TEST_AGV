@@ -15,6 +15,8 @@ class AGV:
         
         self.target = {"x": x, "y": y}
         self.global_path: List[Tuple[float, float]] = []
+        self.visited_nodes: List[Tuple[int, int]] = [] # 儲存 A* 搜尋痕跡
+        
         self.is_running = False
         self.is_planning = False
         self.max_rpm = 3000.0
@@ -32,15 +34,17 @@ class AGV:
             "target": self.target, 
             "is_running": self.is_running,
             "is_planning": self.is_planning,
-            "path": self.global_path, "max_rpm": self.max_rpm
+            "path": self.global_path,
+            "visited": self.visited_nodes, # 傳送搜尋過程
+            "max_rpm": self.max_rpm
         }
 
-    def _async_replan(self, obstacles):
+    def _async_replan(self, obstacles, static_costmap):
         self.is_planning = True
         try:
-            # 規劃時考慮當前所有動態障礙物
-            new_path = self.planner.get_path([self.x, self.y], [self.target["x"], self.target["y"]], obstacles)
-            self.global_path = new_path
+            path, visited = self.planner.get_path([self.x, self.y], [self.target["x"], self.target["y"]], obstacles, static_costmap=static_costmap)
+            self.global_path = path
+            self.visited_nodes = visited
         finally:
             self.is_planning = False
             self.replan_needed = False
@@ -48,42 +52,25 @@ class AGV:
     def update(self, dt: float, world):
         if not self.is_running: return
 
-        # 1. 觸發非同步重規劃
         if self.replan_needed and not self.is_planning:
-            # 獲取包含其他 AGV 的最新快照
             dynamic_obs = world.get_dynamic_obstacles(exclude_agv_id=self.id)
-            thread = threading.Thread(target=self._async_replan, args=(dynamic_obs,), daemon=True)
+            thread = threading.Thread(target=self._async_replan, args=(dynamic_obs, world.static_costmap), daemon=True)
             thread.start()
 
-        # 2. 如果正在規劃，嘗試原地轉向對準目標，不移動
         if self.is_planning:
-            dx, dy = self.target["x"] - self.x, self.target["y"] - self.y
-            target_angle = math.atan2(dy, dx)
-            alpha = math.atan2(math.sin(target_angle - self.theta), math.cos(target_angle - self.theta))
-            if abs(alpha) > 0.4:
-                w = 1.2 if alpha > 0 else -1.2
-                if self.controller.is_pose_safe(self.x, self.y, self.theta + w * 0.1, world.obstacles, margin=515):
-                    self.v = 0
-                    self.omega = np.clip(w, self.omega - 5.0*dt, self.omega + 5.0*dt)
-                    self.x, self.y, self.theta = self.kinematics.update_pose(self.x, self.y, self.theta, self.v, self.omega, dt)
-                    self.l_rpm, self.r_rpm = self.kinematics.velocity_to_rpm(self.v, self.omega)
-                    return
-            self.v = 0; self.omega = 0; return
+            self.v = 0; self.omega = 0
+            self.l_rpm = 0; self.r_rpm = 0
+            return
 
         if not self.global_path: return
 
-        # 3. 獲取動態障礙物 (包含其他正在移動的 AGV)
         dynamic_obs = world.get_dynamic_obstacles(exclude_agv_id=self.id)
 
-        # 4. 尋找最近點並執行控制
         min_dist = float("inf"); closest_idx = 0
         for i, wp in enumerate(self.global_path):
             d = (wp[0]-self.x)**2 + (wp[1]-self.y)**2
             if d < min_dist: min_dist = d; closest_idx = i
         
-        # --- 方案 A：推遠起步前瞻點 ---
-        # 如果速度極低 (剛起步或卡住)，強制往前看至少 4 個點 (約 80cm)
-        # 這能避免因為距離 = 0 導致的角度除以零震盪
         if abs(self.v) < 10.0:
             lookahead = max(4, int(2 + self.v / 150.0))
         else:
@@ -92,7 +79,6 @@ class AGV:
         target_idx = min(closest_idx + lookahead, len(self.global_path)-1)
         target_wp = self.global_path[target_idx]
 
-        # 核心：傳遞動態障礙物給控制器，實現即時避撞
         bv, bo = self.controller.compute_command(
             self.x, self.y, self.theta, self.v, self.omega, 
             target_wp, self.max_rpm, dynamic_obs

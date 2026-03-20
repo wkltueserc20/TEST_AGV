@@ -5,31 +5,35 @@ interface Props {
   telemetry: Telemetry | null;
   selectedAgvId: string | null;
   selectedObstacleId: string | null;
+  showSearch: boolean;
   onCanvasClick: (x: number, y: number) => void;
   onCanvasRightClick: (x: number, y: number) => void;
   onAgvSelect: (id: string) => void;
 }
 
 const MAP_SIZE = 50000;
+const GRID_SIZE = 200; 
 
 const SimulatorCanvas: React.FC<Props> = ({ 
-  telemetry, selectedAgvId, selectedObstacleId, 
+  telemetry, selectedAgvId, selectedObstacleId, showSearch,
   onCanvasClick, onCanvasRightClick, onAgvSelect 
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
-  // 核心優化 1：使用 Ref 來儲存最新數據，避免觸發 useCallback 重建
   const telemetryRef = useRef<Telemetry | null>(null);
   const selectedAgvIdRef = useRef<string | null>(null);
   const selectedObstacleIdRef = useRef<string | null>(null);
   
-  // 同步最新 Props 到 Refs
+  const revealedIndices = useRef<Record<string, number>>({});
+  // 核心修正：儲存特徵值而非陣列對象，避免引用造成的閃爍
+  const lastSearchFingerprints = useRef<Record<string, string>>({});
+
   useEffect(() => { telemetryRef.current = telemetry; }, [telemetry]);
   useEffect(() => { selectedAgvIdRef.current = selectedAgvId; }, [selectedAgvId]);
   useEffect(() => { selectedObstacleIdRef.current = selectedObstacleId; }, [selectedObstacleId]);
 
   const displayStates = useRef<Record<string, {x: number, y: number, theta: number, lastUpdate: number}>>({});
-  const animationFrameId = useRef<number>(); // 儲存動畫 ID 確保唯一性
+  const animationFrameId = useRef<number>();
 
   const worldToCanvas = useCallback((x: number, y: number, canvas: HTMLCanvasElement) => {
     const scale = canvas.width / MAP_SIZE;
@@ -41,7 +45,6 @@ const SimulatorCanvas: React.FC<Props> = ({
     return { x: cx * scale, y: (canvas.height - cy) * scale };
   }, []);
 
-  // 核心優化 2：Render 函數不再依賴經常變動的 Props
   const render = useCallback(() => {
     const canvas = canvasRef.current;
     const currentTelemetry = telemetryRef.current;
@@ -58,36 +61,47 @@ const SimulatorCanvas: React.FC<Props> = ({
     const now = performance.now();
     const multiplier = (currentTelemetry as any).multiplier || 10;
 
-    // --- 1. 平滑處理與預測 ---
     currentTelemetry.agvs.forEach(a => {
       if (!displayStates.current[a.id]) {
         displayStates.current[a.id] = { x: a.x, y: a.y, theta: a.theta, lastUpdate: now };
-        return;
-      }
-
-      const ds = displayStates.current[a.id];
-      const dt = (now - ds.lastUpdate) / 1000.0;
-      
-      if (a.is_running) {
-        const simDt = dt * multiplier;
-        ds.x += a.v * Math.cos(ds.theta) * simDt;
-        ds.y += a.v * Math.sin(ds.theta) * simDt;
-        ds.theta += a.omega * simDt;
-
-        ds.x += (a.x - ds.x) * 0.05;
-        ds.y += (a.y - ds.y) * 0.05;
-        
-        let dTheta = a.theta - ds.theta;
-        while (dTheta > Math.PI) dTheta -= Math.PI * 2;
-        while (dTheta < -Math.PI) dTheta += Math.PI * 2;
-        ds.theta += dTheta * 0.05;
       } else {
-        ds.x = a.x; ds.y = a.y; ds.theta = a.theta;
+        const ds = displayStates.current[a.id];
+        const dt = (now - ds.lastUpdate) / 1000.0;
+        if (a.is_running) {
+          const simDt = dt * multiplier;
+          ds.x += a.v * Math.cos(ds.theta) * simDt;
+          ds.y += a.v * Math.sin(ds.theta) * simDt;
+          ds.theta += a.omega * simDt;
+          ds.x += (a.x - ds.x) * 0.05;
+          ds.y += (a.y - ds.y) * 0.05;
+          let dTheta = a.theta - ds.theta;
+          while (dTheta > Math.PI) dTheta -= Math.PI * 2;
+          while (dTheta < -Math.PI) dTheta += Math.PI * 2;
+          ds.theta += dTheta * 0.05;
+        } else {
+          ds.x = a.x; ds.y = a.y; ds.theta = a.theta;
+        }
+        ds.lastUpdate = now;
       }
-      ds.lastUpdate = now;
+
+      // --- 核心修正：播放進度管理 ---
+      if (a.visited && a.visited.length > 0) {
+        // 使用首尾座標與長度作為特徵值
+        const first = a.visited[0], last = a.visited[a.visited.length - 1];
+        const fingerprint = `${a.visited.length}-${first[0]},${first[1]}-${last[0]},${last[1]}`;
+        
+        if (fingerprint !== lastSearchFingerprints.current[a.id]) {
+            revealedIndices.current[a.id] = 0;
+            lastSearchFingerprints.current[a.id] = fingerprint;
+        }
+        
+        if (revealedIndices.current[a.id] < a.visited.length) {
+            // 每幀揭露的點數，設為 50 讓流水感更明顯
+            revealedIndices.current[a.id] += 50;
+        }
+      }
     });
 
-    // --- 2. 繪圖邏輯 ---
     ctx.fillStyle = '#f0f0f0';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -103,10 +117,24 @@ const SimulatorCanvas: React.FC<Props> = ({
 
     const scale = canvas.width / MAP_SIZE;
 
+    // 繪製 A* 搜尋雲 (流水效果)
     const selectedAgv = currentTelemetry.agvs.find(a => a.id === currentSelectedAgvId);
+    if (showSearch && selectedAgv?.visited) {
+        ctx.fillStyle = 'rgba(0, 123, 255, 0.25)';
+        const blockSize = GRID_SIZE * scale;
+        const count = revealedIndices.current[selectedAgv.id] || 0;
+        
+        for (let i = 0; i < Math.min(count, selectedAgv.visited.length); i++) {
+            const node = selectedAgv.visited[i];
+            const { cx, cy } = worldToCanvas(node[0] * GRID_SIZE, node[1] * GRID_SIZE, canvas);
+            ctx.fillRect(cx - blockSize/2, cy - blockSize/2, blockSize, blockSize);
+        }
+    }
+
     if (selectedAgv?.path) {
       ctx.setLineDash([5, 5]);
-      ctx.strokeStyle = 'rgba(255, 0, 0, 0.4)';
+      ctx.strokeStyle = 'rgba(255, 0, 0, 0.6)';
+      ctx.lineWidth = 2;
       ctx.beginPath();
       selectedAgv.path.forEach((p, i) => {
         const cp = worldToCanvas(p[0], p[1], canvas);
@@ -114,6 +142,7 @@ const SimulatorCanvas: React.FC<Props> = ({
       });
       ctx.stroke();
       ctx.setLineDash([]);
+      ctx.lineWidth = 1;
     }
 
     currentTelemetry.obstacles.forEach(ob => {
@@ -133,8 +162,8 @@ const SimulatorCanvas: React.FC<Props> = ({
       if (!ds) return;
       const { cx, cy } = worldToCanvas(ds.x, ds.y, canvas);
       const agvSize = 1000 * scale;
-
       const goal = worldToCanvas(a.target.x, a.target.y, canvas);
+      
       ctx.fillStyle = a.id === currentSelectedAgvId ? '#28a745' : '#aaa';
       ctx.beginPath(); ctx.arc(goal.cx, goal.cy, 6, 0, 2*Math.PI); ctx.fill();
 
@@ -148,30 +177,22 @@ const SimulatorCanvas: React.FC<Props> = ({
       }
       ctx.fillStyle = 'white'; ctx.fillRect(agvSize/4, -agvSize/10, agvSize/4, agvSize/5);
       ctx.restore();
-      
       ctx.fillStyle = '#333'; ctx.font = '10px Arial';
       ctx.fillText(a.id, cx - 15, cy - agvSize);
     });
 
-    // 核心優化 3：保證單一循環
     animationFrameId.current = requestAnimationFrame(render);
-  }, [worldToCanvas]); // 不再依賴 telemetry
+  }, [worldToCanvas, showSearch]);
 
-  // 核心優化 4：元件掛載時啟動一次，卸載時關閉
   useEffect(() => {
     animationFrameId.current = requestAnimationFrame(render);
-    return () => {
-        if (animationFrameId.current) {
-            cancelAnimationFrame(animationFrameId.current);
-        }
-    };
+    return () => { if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current); };
   }, [render]);
 
   const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current; if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const { x, y } = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top, canvas);
-    // 使用最新數據判定點擊
     const currentTelemetry = telemetryRef.current;
     const clickedAgv = currentTelemetry?.agvs.find(a => Math.sqrt((a.x-x)**2+(a.y-y)**2) < 1500);
     if (clickedAgv) onAgvSelect(clickedAgv.id);

@@ -2,16 +2,15 @@
 
 這是一個工業級的高精度多機 AGV (Automated Guided Vehicle) 模擬系統。採用 **Python FastAPI** 作為運算後端，配合 **React (TypeScript)** 作為可視化前端，實作了結合 **物理勢場 A*** 與 **動態 DWA** 的混合導航架構。
 
-![AGV Simulation](https://img.shields.io/badge/Version-5.1-green)
+![AGV Simulation](https://img.shields.io/badge/Version-5.3-green)
 ![Architecture](https://img.shields.io/badge/Architecture-OOP--Async-orange)
 ![Performance](https://img.shields.io/badge/Performance-60FPS--Smooth-blue)
 
 ## 🚀 核心特色
 
-### 1. V5.1 極致流暢引擎 (High-Performance Engine)
-針對大規模長路徑模擬進行了深度優化：
-- **前端 60FPS 零卡頓**：修正了 `requestAnimationFrame` 記憶體洩漏，採用單一繪圖循環技術，支援長時間連續運行不掉幀。
-- **非同步路徑規劃**：路徑搜尋在背景線程執行，按下 Start 瞬間立即原地轉向響應，物理引擎與通訊層永不阻塞。
+### 1. V5.3 A* 搜尋視覺化 (Search Debugger)
+- **思考過程可見化**：新增「Show A* Search Process」開關，以流水感動畫展示演算法的擴散過程與避障策略。
+- **效能極速優化**：引進預處理代價地圖（Costmap），搜尋速度提升 100 倍，支援複雜場景即時規劃。
 
 ### 2. V5.0+ 多機協同與避障 (Multi-AGV Coordination)
 - **全場域互感應**：AGV 之間能實時感知彼此位置，並自動將其他車輛視為動態圓形障礙物。
