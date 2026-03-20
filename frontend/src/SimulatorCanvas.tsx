@@ -45,6 +45,25 @@ const SimulatorCanvas: React.FC<Props> = ({
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // 修復 Chrome Passive 滾輪警告
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleWheelNative = (e: WheelEvent) => {
+      e.preventDefault();
+      const zoomSpeed = 0.15;
+      const direction = e.deltaY > 0 ? -1 : 1;
+      setViewState(prev => ({ 
+        ...prev, 
+        zoom: Math.min(Math.max(prev.zoom + direction * zoomSpeed * prev.zoom, 0.2), 20.0) 
+      }));
+    };
+
+    canvas.addEventListener('wheel', handleWheelNative, { passive: false });
+    return () => canvas.removeEventListener('wheel', handleWheelNative);
+  }, []);
+
   useEffect(() => { telemetryRef.current = telemetry; }, [telemetry]);
   useEffect(() => { selectedAgvIdRef.current = selectedAgvId; }, [selectedAgvId]);
   useEffect(() => { selectedObstacleIdRef.current = selectedObstacleId; }, [selectedObstacleId]);
@@ -61,14 +80,6 @@ const SimulatorCanvas: React.FC<Props> = ({
     const scale = (w / MAP_SIZE) * vs.zoom;
     return { x: (cx - vs.offsetX) / scale, y: (h + vs.offsetY - cy) / scale };
   }, []);
-
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const zoomSpeed = 0.1;
-    const direction = e.deltaY > 0 ? -1 : 1;
-    const newZoom = Math.min(Math.max(viewState.zoom + direction * zoomSpeed, 0.3), 15.0);
-    setViewState(prev => ({ ...prev, zoom: newZoom }));
-  };
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button === 1 || (e.button === 0 && e.altKey)) {
@@ -107,7 +118,6 @@ const SimulatorCanvas: React.FC<Props> = ({
     const { width: w, height: h } = dimensions;
     const vs = viewState;
 
-    // 1. 物理位置更新
     currentTelemetry.agvs.forEach(a => {
       if (!displayStates.current[a.id]) {
         displayStates.current[a.id] = { x: a.x, y: a.y, theta: a.theta, lastUpdate: now };
@@ -115,16 +125,19 @@ const SimulatorCanvas: React.FC<Props> = ({
         const ds = displayStates.current[a.id];
         const dt = (now - ds.lastUpdate) / 1000.0;
         if (a.is_running) {
-          const simDt = dt * multiplier;
-          ds.x += a.v * Math.cos(ds.theta) * simDt;
-          ds.y += a.v * Math.sin(ds.theta) * simDt;
-          ds.theta += a.omega * simDt;
-          ds.x += (a.x - ds.x) * 0.05;
-          ds.y += (a.y - ds.y) * 0.05;
+          // 核心優化：移除 multiplier
+          // 後端已經快進了座標，前端只需做純粹的視覺平滑
+          ds.x += a.v * Math.cos(ds.theta) * dt;
+          ds.y += a.v * Math.sin(ds.theta) * dt;
+          ds.theta += a.omega * dt;
+          
+          // 強力同步：快速修正到遙測座標
+          ds.x += (a.x - ds.x) * 0.3;
+          ds.y += (a.y - ds.y) * 0.3;
           let dTheta = a.theta - ds.theta;
           while (dTheta > Math.PI) dTheta -= Math.PI * 2;
           while (dTheta < -Math.PI) dTheta += Math.PI * 2;
-          ds.theta += dTheta * 0.05;
+          ds.theta += dTheta * 0.3;
         } else {
           ds.x = a.x; ds.y = a.y; ds.theta = a.theta;
         }
@@ -140,35 +153,29 @@ const SimulatorCanvas: React.FC<Props> = ({
       }
     });
 
-    // 2. 繪圖基礎
     ctx.fillStyle = '#0d0e12';
     ctx.fillRect(0, 0, w, h);
 
-    // --- 核心優化：地圖邊界與點陣 ---
-    // 繪製地圖邊界線 (50m x 50m)
     const pTopLeft = worldToCanvas(0, MAP_SIZE, w, h, vs);
     const pBottomRight = worldToCanvas(MAP_SIZE, 0, w, h, vs);
-    const mapWidth = pBottomRight.cx - pTopLeft.cx;
-    const mapHeight = pBottomRight.cy - pTopLeft.cy;
-
     ctx.strokeStyle = '#2d333b';
-    ctx.lineWidth = 2 * vs.zoom;
-    ctx.strokeRect(pTopLeft.cx, pTopLeft.cy, mapWidth, mapHeight);
+    ctx.lineWidth = Math.max(1, 2 * vs.zoom);
+    ctx.strokeRect(pTopLeft.cx, pTopLeft.cy, pBottomRight.cx - pTopLeft.cx, pBottomRight.cy - pTopLeft.cy);
 
-    // 繪製點狀格線 (僅在地圖內繪製)
     ctx.fillStyle = '#3a3f4b';
     for (let x = 0; x <= MAP_SIZE; x += 5000) {
       for (let y = 0; y <= MAP_SIZE; y += 5000) {
         const { cx, cy } = worldToCanvas(x, y, w, h, vs);
         if (cx >= 0 && cx <= w && cy >= 0 && cy <= h) {
-            ctx.beginPath(); ctx.arc(cx, cy, 1.5 * vs.zoom, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); 
+            ctx.arc(cx, cy, Math.max(0.1, 1.5 * vs.zoom), 0, Math.PI * 2); 
+            ctx.fill();
         }
       }
     }
 
     const scale = (w / MAP_SIZE) * vs.zoom;
 
-    // 3. 搜尋雲
     const selectedAgv = currentTelemetry.agvs.find(a => a.id === currentSelectedAgvId);
     if (showSearch && selectedAgv?.visited) {
         ctx.fillStyle = 'rgba(0, 255, 255, 0.08)';
@@ -181,7 +188,6 @@ const SimulatorCanvas: React.FC<Props> = ({
         }
     }
 
-    // 4. 導航路徑
     if (selectedAgv?.path) {
       ctx.setLineDash([5, 5]);
       ctx.strokeStyle = '#ff4d4d';
@@ -196,14 +202,13 @@ const SimulatorCanvas: React.FC<Props> = ({
       ctx.setLineDash([]); ctx.shadowBlur = 0;
     }
 
-    // 5. 障礙物
     currentTelemetry.obstacles.forEach(ob => {
       const { cx, cy } = worldToCanvas(ob.x, ob.y, w, h, vs);
       const isSelected = currentSelectedObId === ob.id;
       ctx.save();
       ctx.translate(cx, cy);
       if (ob.type === 'circle') {
-          const r = (ob.radius || 500) * scale;
+          const r = Math.max(0.1, (ob.radius || 500) * scale);
           ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37';
           ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
           ctx.restore();
@@ -216,7 +221,6 @@ const SimulatorCanvas: React.FC<Props> = ({
           const ow = ob.width * scale, oh = ob.height * scale;
           ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37';
           ctx.fillRect(-ow/2, -oh/2, ow, oh);
-          // 補回斜線細節
           ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
           ctx.beginPath();
           for (let i = -ow; i < ow + oh; i += 10*vs.zoom) { ctx.moveTo(i, -oh/2); ctx.lineTo(i - oh, oh/2); }
@@ -231,13 +235,17 @@ const SimulatorCanvas: React.FC<Props> = ({
       ctx.restore();
     });
 
-    // 6. 目標位置
     currentTelemetry.agvs.forEach(a => {
       const isSelected = a.id === currentSelectedAgvId;
       const { cx, cy } = worldToCanvas(a.target.x, a.target.y, w, h, vs);
-      ctx.save();
-      ctx.translate(cx, cy);
-      const pulse = (1 + Math.sin(now / 200) * 0.15) * vs.zoom;
+      if (a.status === 'YIELDING' || a.status === 'RELOCATING') {
+          ctx.save(); ctx.translate(cx, cy);
+          ctx.strokeStyle = '#bb86fc'; ctx.lineWidth = 2 * vs.zoom;
+          ctx.beginPath(); ctx.moveTo(-10, -10); ctx.lineTo(10, 10); ctx.moveTo(10, -10); ctx.lineTo(-10, 10); ctx.stroke();
+          ctx.restore();
+      }
+      ctx.save(); ctx.translate(cx, cy);
+      const pulse = Math.max(0.1, (1 + Math.sin(now / 200) * 0.15) * vs.zoom);
       ctx.strokeStyle = isSelected ? '#39ff14' : '#1b5e20';
       ctx.lineWidth = 2 * vs.zoom;
       ctx.beginPath(); ctx.arc(0, 0, 12 * pulse, 0, Math.PI * 2); ctx.stroke();
@@ -245,80 +253,96 @@ const SimulatorCanvas: React.FC<Props> = ({
       ctx.restore();
     });
 
-    // --- 7. 核心優化：AGV ICON 細節補回 ---
+    // 繪製路徑預演 (Repulsion Zones / 排斥力場)
+    if (currentTelemetry.path_occupancy) {
+        ctx.save();
+        Object.entries(currentTelemetry.path_occupancy).forEach(([id, points]) => {
+            // 使用淡淡的紅色圓圈表示受影響區域
+            ctx.fillStyle = 'rgba(255, 77, 77, 0.1)';
+            points.forEach(p => {
+                const cp = worldToCanvas(p[0], p[1], w, h, vs);
+                ctx.beginPath();
+                ctx.arc(cp.cx, cp.cy, 800 * scale, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        });
+        ctx.restore();
+    }
+
+    // 繪製社交連結 (關係線)
+    if (currentTelemetry.social_links) {
+        currentTelemetry.social_links.forEach(link => {
+            const fromAgv = currentTelemetry.agvs.find(a => a.id === link.from);
+            const toAgv = currentTelemetry.agvs.find(a => a.id === link.to);
+            if (fromAgv && toAgv) {
+                const p1 = worldToCanvas(fromAgv.x, fromAgv.y, w, h, vs);
+                const p2 = worldToCanvas(toAgv.x, toAgv.y, w, h, vs);
+                ctx.save();
+                ctx.setLineDash([5, 5]);
+                // WAITING 用橘色，YIELDING 用紫色
+                const color = link.type === 'WAITING' ? 'rgba(255, 152, 0, 0.6)' : 'rgba(187, 134, 252, 0.6)';
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2 * vs.zoom;
+                ctx.beginPath();
+                ctx.moveTo(p1.cx, p1.cy);
+                ctx.lineTo(p2.cx, p2.cy);
+                ctx.stroke();
+                
+                // 繪製小箭頭指向阻塞者
+                const angle = Math.atan2(p2.cy - p1.cy, p2.cx - p1.cx);
+                ctx.translate(p2.cx - Math.cos(angle) * 30 * vs.zoom, p2.cy - Math.sin(angle) * 30 * vs.zoom);
+                ctx.rotate(angle);
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.lineTo(-10 * vs.zoom, -5 * vs.zoom);
+                ctx.lineTo(-10 * vs.zoom, 5 * vs.zoom);
+                ctx.fill();
+                ctx.restore();
+            }
+        });
+    }
+
     currentTelemetry.agvs.forEach(a => {
       const ds = displayStates.current[a.id];
       if (!ds) return;
       const { cx, cy } = worldToCanvas(ds.x, ds.y, w, h, vs);
       const isSelected = a.id === currentSelectedAgvId;
       const sz = 1000 * scale;
-
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.rotate(-ds.theta);
-
-      // A. 掃描光束
-      if (isSelected) {
-          const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, sz * 1.5);
-          gradient.addColorStop(0, 'rgba(0, 242, 255, 0.15)');
-          gradient.addColorStop(1, 'rgba(0, 242, 255, 0)');
-          ctx.fillStyle = gradient;
-          ctx.beginPath(); ctx.moveTo(0, 0);
-          ctx.arc(0, 0, sz * 1.5, -Math.PI/6, Math.PI/6); ctx.fill();
+      ctx.save(); ctx.translate(cx, cy); ctx.rotate(-ds.theta);
+      if (isSelected || a.status === 'EVADING' || a.status === 'STUCK') {
+          let beamColor = 'rgba(0, 242, 255, 0.15)';
+          if (a.status === 'EVADING') beamColor = 'rgba(187, 134, 252, 0.2)';
+          if (a.status === 'PLANNING') beamColor = 'rgba(255, 193, 7, 0.15)';
+          const gradientRadius = Math.max(0.1, sz * 1.5);
+          const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, gradientRadius);
+          gradient.addColorStop(0, beamColor); gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+          ctx.fillStyle = gradient; ctx.beginPath(); ctx.moveTo(0, 0);
+          ctx.arc(0, 0, gradientRadius, -Math.PI/6, Math.PI/6); ctx.fill();
       }
-
-      // B. 底盤圓角矩形 (增加金屬陰影)
-      ctx.fillStyle = '#1a1a1a';
-      ctx.strokeStyle = isSelected ? '#00f2ff' : '#555';
-      ctx.lineWidth = 2 * vs.zoom;
-      if (isSelected) { ctx.shadowBlur = 15; ctx.shadowColor = '#00f2ff'; }
-      
-      const r = 10 * scale;
-      ctx.beginPath();
-      ctx.moveTo(-sz/2 + r, -sz/2); ctx.lineTo(sz/2 - r, -sz/2); ctx.quadraticCurveTo(sz/2, -sz/2, sz/2, -sz/2 + r);
-      ctx.lineTo(sz/2, sz/2 - r); ctx.quadraticCurveTo(sz/2, sz/2, sz/2 - r, sz/2);
-      ctx.lineTo(-sz/2 + r, sz/2); ctx.quadraticCurveTo(-sz/2, sz/2, -sz/2, sz/2 - r);
-      ctx.lineTo(-sz/2, -sz/2 + r); ctx.quadraticCurveTo(-sz/2, -sz/2, -sz/2 + r, -sz/2);
-      ctx.fill(); ctx.stroke();
-      ctx.shadowBlur = 0;
-
-      // C. 左右輪胎
-      ctx.fillStyle = '#000';
-      ctx.fillRect(-sz/4, -sz/2 - 3*vs.zoom, sz/2, 6*vs.zoom);
-      ctx.fillRect(-sz/4, sz/2 - 3*vs.zoom, sz/2, 6*vs.zoom);
-
-      // D. LiDAR 頂蓋與旋轉掃描線
-      ctx.beginPath(); ctx.arc(0, 0, sz/4, 0, Math.PI * 2);
-      ctx.fillStyle = '#333'; ctx.fill();
-      ctx.strokeStyle = isSelected ? '#00f2ff' : '#444';
-      ctx.stroke();
-      
+      let strokeColor = isSelected ? '#00f2ff' : (a.status === 'EVADING' ? '#bb86fc' : (a.status === 'STUCK' ? '#ff4d4d' : '#555'));
+      ctx.fillStyle = '#1a1a1a'; ctx.strokeStyle = strokeColor; ctx.lineWidth = 2 * vs.zoom;
+      if (isSelected) { ctx.shadowBlur = 15; ctx.shadowColor = strokeColor; }
+      const r = Math.max(0.1, 10 * scale);
+      ctx.beginPath(); ctx.moveTo(-sz/2 + r, -sz/2); ctx.lineTo(sz/2 - r, -sz/2);
+      ctx.quadraticCurveTo(sz/2, -sz/2, sz/2, -sz/2 + r); ctx.lineTo(sz/2, sz/2 - r);
+      ctx.quadraticCurveTo(sz/2, sz/2, sz/2 - r, sz/2); ctx.lineTo(-sz/2 + r, sz/2);
+      ctx.quadraticCurveTo(-sz/2, sz/2, -sz/2, sz/2 - r); ctx.lineTo(-sz/2, -sz/2 + r);
+      ctx.quadraticCurveTo(-sz/2, -sz/2, -sz/2 + r, -sz/2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#000'; ctx.fillRect(-sz/4, -sz/2 - 3*vs.zoom, sz/2, 6*vs.zoom); ctx.fillRect(-sz/4, sz/2 - 3*vs.zoom, sz/2, 6*vs.zoom);
+      ctx.beginPath(); ctx.arc(0, 0, Math.max(0.1, sz/4), 0, Math.PI * 2); ctx.fillStyle = '#333'; ctx.fill();
+      ctx.strokeStyle = isSelected ? '#00f2ff' : '#444'; ctx.stroke();
       const scanAngle = (now / 400) % (Math.PI * 2);
-      ctx.beginPath(); ctx.moveTo(0, 0);
-      ctx.lineTo(Math.cos(scanAngle)*sz/4, Math.sin(scanAngle)*sz/4);
-      ctx.strokeStyle = isSelected ? '#00f2ff' : '#555';
-      ctx.lineWidth = 1.5 * vs.zoom;
-      ctx.stroke();
-
-      // E. 車頭導航箭頭
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(scanAngle)*sz/4, Math.sin(scanAngle)*sz/4);
+      ctx.strokeStyle = isSelected ? '#00f2ff' : '#555'; ctx.lineWidth = 1.5 * vs.zoom; ctx.stroke();
       ctx.fillStyle = isSelected ? '#00f2ff' : '#aaa';
-      ctx.beginPath();
-      ctx.moveTo(sz/2 - 5*vs.zoom, 0);
-      ctx.lineTo(sz/2 - 15*vs.zoom, -10*vs.zoom);
-      ctx.lineTo(sz/2 - 15*vs.zoom, 10*vs.zoom);
-      ctx.fill();
-
-      // F. 狀態 LED (帶發光)
+      ctx.beginPath(); ctx.moveTo(sz/2 - 5*vs.zoom, 0); ctx.lineTo(sz/2 - 15*vs.zoom, -10*vs.zoom); ctx.lineTo(sz/2 - 15*vs.zoom, 10*vs.zoom); ctx.fill();
       const ledColor = a.is_running ? '#00ff00' : (a.is_planning ? '#ffc107' : '#ff3333');
-      ctx.beginPath(); ctx.arc(-sz/2 + 15*vs.zoom, -sz/2 + 15*vs.zoom, 4*vs.zoom, 0, Math.PI * 2);
-      ctx.fillStyle = ledColor;
-      ctx.shadowBlur = 8; ctx.shadowColor = ledColor;
-      ctx.fill();
-
+      ctx.beginPath(); ctx.arc(-sz/2 + 15*vs.zoom, -sz/2 + 15*vs.zoom, Math.max(0.1, 4*vs.zoom), 0, Math.PI * 2);
+      ctx.fillStyle = ledColor; ctx.shadowBlur = 8; ctx.shadowColor = ledColor; ctx.fill();
       ctx.restore();
       ctx.shadowBlur = 0;
-      ctx.fillStyle = '#fff';
-      ctx.font = `bold ${Math.max(8, 11 * vs.zoom)}px monospace`;
+      ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(8, 11 * vs.zoom)}px monospace`;
       ctx.fillText(a.id, cx - 20, cy - sz * 0.7);
     });
 
@@ -341,7 +365,6 @@ const SimulatorCanvas: React.FC<Props> = ({
     <div ref={containerRef} style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
       <canvas ref={canvasRef} width={dimensions.width} height={dimensions.height} 
         style={{ border: '2px solid #333', background: '#0d0e12', cursor: isDragging.current ? 'grabbing' : 'crosshair' }} 
-        onWheel={handleWheel}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}

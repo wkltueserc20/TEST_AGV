@@ -1,6 +1,6 @@
 import heapq
 import math
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 
 class AStarPlanner:
     def __init__(self, map_size=50000, grid_size=200):
@@ -10,9 +10,6 @@ class AStarPlanner:
         self.nodes_y = map_size // grid_size
 
     def get_path(self, start: List[float], goal: List[float], obstacles: List[Dict[str, Any]], static_costmap=None) -> Tuple[List[Tuple[float, float]], List[Tuple[int, int]]]:
-        """
-        計算全局路徑，並回傳搜尋過程中探索過的節點 (visited) 用於可視化。
-        """
         start_grid = (int(round(start[0] / self.grid_size)), int(round(start[1] / self.grid_size)))
         goal_grid = (int(round(goal[0] / self.grid_size)), int(round(goal[1] / self.grid_size)))
         
@@ -30,24 +27,25 @@ class AStarPlanner:
                 penalty = 0
             
             if penalty >= 1000000: return penalty
-            
+            # 2. 加入動態障礙物 (其他 AGV)
             wx, wy = gx * self.grid_size, gy * self.grid_size
             for dx, dy, dr in dyn_geoms:
                 d = math.sqrt((wx - dx)**2 + (wy - dy)**2) - dr
-                if d < 520: return 1000000.0
-                if d < 1500: penalty += (1500.0 / d) ** 4
+                # 核心修正：將 AGV 視為「泥沼」而非「高牆」
+                # 之前是 520mm 內 return 1000000.0
+                if d < 520: penalty += 50000.0 
+                elif d < 1500: penalty += (1500.0 / d) ** 4
+
             return penalty
 
-        # --- A* 搜尋核心 ---
         queue = [(0, 0, start_grid)]
         came_from = {start_grid: None}
         cost_so_far = {start_grid: 0}
-        visited = [] # 記錄探索順序
+        visited = []
 
         while queue:
             _, _, current = heapq.heappop(queue)
-            visited.append(current) # 記錄目前彈出的節點
-            
+            visited.append(current)
             if current == goal_grid: break
             
             for dx, dy in [(0,1),(0,-1),(1,0),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]:
@@ -72,7 +70,6 @@ class AStarPlanner:
             curr = came_from[curr]
         path.reverse()
 
-        # 幾何平滑化
         if len(path) > 5:
             smooth_path = [path[0]]
             for i in range(1, len(path)-1):
@@ -83,3 +80,38 @@ class AStarPlanner:
             return smooth_path, visited
             
         return path, visited
+
+    def find_nearest_intersection(self, start_pos: Tuple[float, float], static_costmap) -> Optional[Tuple[float, float]]:
+        """使用 BFS 尋找最近的路口 (節點具備 > 2 個可通行方向)"""
+        if static_costmap is None: return None
+        
+        start_grid = (int(start_pos[0] // self.grid_size), int(start_pos[1] // self.grid_size))
+        queue = [start_grid]
+        visited = {start_grid}
+        
+        # 限制搜尋範圍 (5公尺)
+        max_dist_grids = 5000 // self.grid_size
+        
+        while queue:
+            curr = queue.pop(0)
+            
+            # 檢查是否為路口
+            navigable_neighbors = 0
+            for dx, dy in [(0,1),(0,-1),(1,0),(-1,0)]:
+                nx, ny = curr[0] + dx, curr[1] + dy
+                if 0 <= nx < self.nodes_x and 0 <= ny < self.nodes_y:
+                    if static_costmap[nx, ny] == 0:
+                        navigable_neighbors += 1
+            
+            if navigable_neighbors > 2: # 發現路口
+                return (curr[0] * self.grid_size, curr[1] * self.grid_size)
+            
+            # 繼續搜尋
+            if abs(curr[0] - start_grid[0]) < max_dist_grids and abs(curr[1] - start_grid[1]) < max_dist_grids:
+                for dx, dy in [(0,1),(0,-1),(1,0),(-1,0)]:
+                    neighbor = (curr[0] + dx, curr[1] + dy)
+                    if neighbor not in visited and 0 <= neighbor[0] < self.nodes_x and 0 <= neighbor[1] < self.nodes_y:
+                        if static_costmap[neighbor[0], neighbor[1]] == 0:
+                            visited.add(neighbor)
+                            queue.append(neighbor)
+        return None

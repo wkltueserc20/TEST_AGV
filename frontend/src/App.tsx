@@ -97,7 +97,7 @@ function App() {
             {isConnected ? '● CONNECTED' : '○ DISCONNECTED'}
           </div>
           <div className="btn-group-grid">
-            {[1, 5, 10, 15].map(m => (
+            {[1, 10, 20, 30].map(m => (
               <button key={m} className={telemetry?.multiplier === m ? 'primary' : ''} onClick={() => sendCommand('set_multiplier', { data: m })}>{m}x</button>
             ))}
           </div>
@@ -114,8 +114,18 @@ function App() {
               <div key={a.id} className={`item-card ${selectedAgvId === a.id ? 'active' : ''}`} onClick={() => { setSelectedAgvId(a.id); setSelectedObId(null); }}>
                 <div className="item-header">
                   <span>{a.id}</span>
-                  <span style={{ fontSize: '10px', color: a.is_running ? '#39ff14' : '#8b949e' }}>
-                    {a.is_planning ? 'PLANNING' : (a.is_running ? 'MOVING' : 'IDLE')}
+                  <span style={{ 
+                    fontSize: '10px', 
+                    fontWeight: 'bold',
+                    color: a.status === 'EXECUTING' ? '#39ff14' : 
+                           a.status === 'PLANNING' ? '#ffc107' : 
+                           a.status === 'EVADING' ? '#bb86fc' :
+                           a.status === 'STUCK' ? '#ff4d4d' : '#8b949e' 
+                  }}>
+                    {a.status === 'EXECUTING' ? 'EXECUTING' :
+                     a.status === 'PLANNING' ? 'THINKING' :
+                     a.status === 'EVADING' ? 'EVADING PATH' :
+                     a.status === 'STUCK' ? 'BLOCKED' : 'STANDBY'}
                   </span>
                 </div>
               </div>

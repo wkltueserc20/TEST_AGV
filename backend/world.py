@@ -4,7 +4,7 @@ import os
 import logging
 import threading
 import numpy as np
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +14,7 @@ class World:
         self.height = height
         self.obstacles: List[Dict[str, Any]] = []
         self.agvs: Dict[str, Any] = {}
+        self.path_occupancy: Dict[str, List[Tuple[float, float]]] = {}
         self.storage_file = "obstacles.json"
         
         self.grid_res = 200.0
@@ -120,6 +121,13 @@ class World:
     def clear_obstacles(self):
         self.obstacles = []
         self.save_obstacles()
+
+    def update_path_occupancy(self, agv_id: str, path_points: List[Tuple[float, float]]):
+        self.path_occupancy[agv_id] = path_points
+
+    def clear_path_occupancy(self, agv_id: str):
+        if agv_id in self.path_occupancy:
+            del self.path_occupancy[agv_id]
 
     def get_dynamic_obstacles(self, exclude_agv_id: str) -> List[Dict[str, Any]]:
         dyn_obs = []

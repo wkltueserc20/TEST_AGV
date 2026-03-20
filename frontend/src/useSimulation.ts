@@ -5,14 +5,26 @@ export interface AGVData {
   v: number; omega: number;
   l_rpm: number; r_rpm: number;
   max_rpm: number; is_running: boolean;
+  is_planning: boolean;
+  status: string;
   target: { x: number; y: number };
   path: [number, number][];
+  visited?: [number, number][];
+  culprit_id?: string;
+}
+
+export interface SocialLink {
+  from: string;
+  to: string;
+  type: string;
 }
 
 export interface Telemetry {
   agvs: AGVData[];
   obstacles: any[];
   multiplier: number;
+  social_links?: SocialLink[];
+  path_occupancy?: Record<string, [number, number][]>;
 }
 
 export const useSimulation = (url: string) => {

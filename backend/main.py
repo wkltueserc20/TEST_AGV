@@ -29,10 +29,24 @@ with world_lock:
 
 def get_snapshot():
     with world_lock:
+        agvs_data = [a.to_dict() for a in world.agvs.values()]
+        
+        # 建立社交連結 (誰在等誰，或是誰在讓誰)
+        links = []
+        for a in world.agvs.values():
+            if a.culprit_id and a.culprit_id.startswith("AGV"):
+                links.append({
+                    "from": a.id, 
+                    "to": a.culprit_id, 
+                    "type": a.status
+                })
+        
         return {
-            "agvs": [a.to_dict() for a in world.agvs.values()],
+            "agvs": agvs_data,
             "obstacles": list(world.obstacles),
-            "multiplier": SIM_MULTIPLIER
+            "multiplier": SIM_MULTIPLIER,
+            "social_links": links,
+            "path_occupancy": {k: v for k, v in world.path_occupancy.items()}
         }
 
 class ConnectionManager:
@@ -107,24 +121,29 @@ def process_commands():
             logger.error(f"Error processing command {t}: {e}")
 
 def physics_engine_thread():
-    dt = 0.1
-    sub_dt = 0.01 
+    # 採用穩定的 60Hz 運算 (約 0.0166s 每幀)
+    real_dt = 0.0166 
     while True:
         cycle_start = time.time()
         process_commands()
+        
+        # 計算模擬步長：現實時間 * 倍速
+        sim_dt = real_dt * SIM_MULTIPLIER
+        
         with world_lock:
-            for _ in range(SIM_MULTIPLIER):
-                for _sub in range(10): 
-                    for a in world.agvs.values():
-                        a.update(sub_dt, world)
+            for a in world.agvs.values():
+                # 告訴 AGV：模擬世界過了 sim_dt 秒
+                a.update(sim_dt, world)
+        
         elapsed = time.time() - cycle_start
-        if dt > elapsed:
-            time.sleep(dt - elapsed)
+        if real_dt > elapsed:
+            time.sleep(real_dt - elapsed)
 
 async def telemetry_broadcaster():
     while True:
+        # 維持 30Hz 的廣播即可，這對人類視覺已足夠流暢
         await manager.broadcast({"type": "telemetry", "data": get_snapshot()})
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.033)
 
 @app.on_event("startup")
 async def startup():
