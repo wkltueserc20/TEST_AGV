@@ -74,8 +74,9 @@ class AGV:
         }
 
     def _async_replan(self, obstacles, static_costmap, world=None, original_status=None, is_evasion_search=False):
+        # 核心優化：規劃期間不再鎖死速度為 0，除非是剛從 IDLE 啟動
         self.is_planning = True
-        if self.status == AGVStatus.IDLE: self.status = AGVStatus.PLANNING
+        
         try:
             if is_evasion_search:
                 all_threat_paths = [p for oid, p in world.path_occupancy.items() if oid != self.id]
@@ -104,10 +105,18 @@ class AGV:
             if not path:
                 self.global_path = []; return
             self.global_path = path; self.visited_nodes = visited
+            # 只有當目前不是避讓狀態時，才更新為任務執行狀態
             if self.status != AGVStatus.EVADING:
                 self.status = AGVStatus.EXECUTING if self.is_running else AGVStatus.IDLE
         finally:
             self.is_planning = False; self.replan_needed = False
+
+    def is_conflicted(self, world) -> bool:
+        for other_id, points in world.path_occupancy.items():
+            if other_id == self.id: continue
+            for px, py in points:
+                if math.sqrt((px - self.x)**2 + (py - self.y)**2) < 1500: return True
+        return False
 
     def update(self, dt: float, world):
         if self.replan_needed and not self.is_planning:
@@ -116,6 +125,7 @@ class AGV:
             thread = threading.Thread(target=self._async_replan, args=(all_obs, world.static_costmap, world, self.status), daemon=True)
             thread.start()
 
+        # 廣播意圖
         if self.global_path:
             min_dist = float("inf"); closest_idx = 0
             for i, wp in enumerate(self.global_path):
@@ -126,39 +136,44 @@ class AGV:
         else: world.clear_path_occupancy(self.id)
 
         if self.is_planning:
-            self.v = 0; self.omega = 0; self.l_rpm, self.r_rpm = 0, 0; return
+            # 規劃期間不完全凍結，維持目前運動狀態
+            pass 
 
         if not self.is_running:
             self.status = AGVStatus.IDLE; self.v = 0; self.omega = 0
             world.release_haven(self.id) 
             self._last_compute_time += dt
             if self._last_compute_time >= 0.05:
-                # 關鍵優化：IDLE 狀態下也使用 2.0m 作為觸發閾值
                 self.check_proactive_evasion(world); self._last_compute_time = 0.0
             self.l_rpm, self.r_rpm = 0, 0; return
         
         if self.status == AGVStatus.EVADING:
             self._last_compute_time += dt
             if self._last_compute_time >= 0.1:
-                # 只有當「避難目標點」本身被衝突時才重新閃避，否則跑到底
                 if not self._is_haven_safe(self.target["x"], self.target["y"], world):
                     self.check_proactive_evasion(world)
                 self._last_compute_time = 0.0
 
-        if not self.global_path: return
+        if not self.global_path: 
+            self.l_rpm, self.r_rpm = 0, 0; return
 
+        # 1. 決策層
         self._last_compute_time += dt
         if self._last_compute_time >= 0.05:
+            if self.is_planning: # 規劃期間跳過決策
+                self._last_compute_time = 0.0; return
+
             all_obs = world.obstacles + world.get_dynamic_obstacles(exclude_agv_id=self.id)
             min_dist = float("inf"); closest_idx = 0
             for i, wp in enumerate(self.global_path):
                 d = (wp[0]-self.x)**2 + (wp[1]-self.y)**2
                 if d < min_dist: min_dist = d; closest_idx = i
-            lookahead = max(4, int(4 + abs(self.v) / 100.0))
+            lookahead = max(4 if abs(self.v) < 10 else 1, int(2 + abs(self.v) / 150.0))
             target_wp = self.global_path[min(closest_idx + lookahead, len(self.global_path)-1)]
             margin = 505 if self.status == AGVStatus.EVADING else 525
             max_speed_mms = self.max_rpm * self.kinematics.rpm_to_mms
             
+            # 社交禮讓
             current_max_speed = max_speed_mms
             if self.status == AGVStatus.EXECUTING:
                 for other_id, other_agv in world.agvs.items():
@@ -171,7 +186,7 @@ class AGV:
                         is_on_my_path = False
                         path_projection = world.path_occupancy.get(self.id, [])
                         for px, py in path_projection[:20]:
-                            if math.sqrt((other_agv.x - px)**2 + (other_agv.y - py)**2) < 1500:
+                            if math.sqrt((other_agv.x - px)**2 + (other_agv.y - py)**2) < 1200:
                                 is_on_my_path = True; break
                         if is_on_my_path:
                             if dist < 2000: current_max_speed = 0.0 
@@ -186,6 +201,14 @@ class AGV:
             if self.target_v == 0 and self.target_omega == 0: self.status = AGVStatus.STUCK
             else: self.status = AGVStatus.EXECUTING if self.status != AGVStatus.EVADING else AGVStatus.EVADING
 
+        # 3. 緊急恢復
+        if self.status == AGVStatus.STUCK and self.v == 0:
+            if not self.stuck_start_time: self.stuck_start_time = time.time()
+            if time.time() - self.stuck_start_time > 2.0: 
+                self.recovery_nudge_time = 0.5; self.stuck_start_time = None 
+        else: self.stuck_start_time = None
+
+        # 2. 執行層
         remaining_dt = dt
         sub_dt = 0.05 if dt > 0.1 else 0.01 
         max_speed_mms = self.max_rpm * self.kinematics.rpm_to_mms
@@ -216,8 +239,7 @@ class AGV:
             if other_id == self.id: continue
             path_points = world.path_occupancy.get(other_id, [])
             if not path_points: continue
-            # 核心修正：觸發閾值與禁區對齊 (2.0m)
-            # 只有當我真的擋在別人 2.0m 範圍內，才啟動閃避
+            # 觸發閾值與禁區對齊 (2.0m)
             for px, py in path_points:
                 if math.sqrt((px - self.x)**2 + (py - self.y)**2) < 2000:
                     self.trigger_evasion(world, threat_pos=(other_agv.x, other_agv.y))

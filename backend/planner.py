@@ -84,7 +84,7 @@ class AStarPlanner:
         return path, visited
 
     def find_nearest_safe_spot(self, start_pos: Tuple[float, float], static_costmap, threat_paths: List[List[Tuple[float, float]]], repulsion_vec: Tuple[float, float] = None) -> Optional[Tuple[float, float]]:
-        """尋找一次到位的完美避難點，使用精確圓形禁區。"""
+        """尋找高品質、定向優先且符合 2m 安全原則的避難點。"""
         if static_costmap is None: return None
         
         start_grid = (int(start_pos[0] // self.grid_size), int(start_pos[1] // self.grid_size))
@@ -92,7 +92,7 @@ class AStarPlanner:
         visited = {start_grid}
         max_dist_grids = 15000 // self.grid_size 
         
-        # 1. 建立精確的圓形威脅區 (半徑 2000mm)
+        # 建立圓形禁區
         threat_grids = set()
         r_grids = 2000 // self.grid_size
         for path in threat_paths:
@@ -100,26 +100,31 @@ class AStarPlanner:
                 tx, ty = int(px // self.grid_size), int(py // self.grid_size)
                 for dx in range(-int(r_grids), int(r_grids) + 1):
                     for dy in range(-int(r_grids), int(r_grids) + 1):
-                        if dx*dx + dy*dy <= r_grids**2: # 圓形判斷
+                        if dx*dx + dy*dy <= r_grids**2:
                             threat_grids.add((tx + dx, ty + dy))
 
-        while queue:
-            gx, gy = queue.pop(0)
-            wx, wy = gx * self.grid_size, gy * self.grid_size
+        # 為了實作「反方向優先」，我們分兩輪搜尋
+        # 第一輪：嚴格限制在反方向 (Dot Product > 0)
+        # 第二輪：如果第一輪失敗，則開放全方位
+        for stage in ["DIRECTED", "FULL"]:
+            current_queue = list(queue)
+            current_visited = set(visited)
             
-            # 2. 安全原則 (離牆2m) 與 圓形衝突檢查
-            if static_costmap[gx, gy] == 0 and (gx, gy) not in threat_grids:
-                # 3. 定向過濾
-                is_correct_direction = True
-                if repulsion_vec:
-                    vx, vy = wx - start_pos[0], wy - start_pos[1]
-                    v_mag = math.sqrt(vx**2 + vy**2)
-                    if v_mag > 500:
-                        dot = (vx/v_mag) * repulsion_vec[0] + (vy/v_mag) * repulsion_vec[1]
-                        if dot < -0.3: is_correct_direction = False
+            while current_queue:
+                gx, gy = current_queue.pop(0)
+                wx, wy = gx * self.grid_size, gy * self.grid_size
                 
-                if is_correct_direction:
-                    # 4. 足跡驗證 (1000x1000mm 需要 5x5 網格檢查)
+                # 檢查安全原則 (Cost == 0) 與 衝突
+                if static_costmap[gx, gy] == 0 and (gx, gy) not in threat_grids:
+                    # 定向過濾
+                    if stage == "DIRECTED" and repulsion_vec:
+                        vx, vy = wx - start_pos[0], wy - start_pos[1]
+                        v_mag = math.sqrt(vx**2 + vy**2)
+                        if v_mag > 500:
+                            dot = (vx/v_mag) * repulsion_vec[0] + (vy/v_mag) * repulsion_vec[1]
+                            if dot < 0: continue # 第一輪只找反方向
+                    
+                    # 足跡驗證 (5x5)
                     is_footprint_safe = True
                     for bx in range(-2, 3):
                         for by in range(-2, 3):
@@ -129,16 +134,15 @@ class AStarPlanner:
                         if not is_footprint_safe: break
                     
                     if is_footprint_safe:
-                        # 核心優化：最小逃逸位移提高到 5公尺，確保一次大跨度撤離
-                        if (wx - start_pos[0])**2 + (wy - start_pos[1])**2 > 5000**2:
+                        if (wx - start_pos[0])**2 + (wy - start_pos[1])**2 > 1000**2:
                             return (wx, wy)
-            
-            # 繼續 BFS 擴散
-            if abs(gx - start_grid[0]) < max_dist_grids and abs(gy - start_grid[1]) < max_dist_grids:
-                for dx, dy in [(0,1),(0,-1),(1,0),(-1,0)]:
-                    nx, ny = gx + dx, gy + dy
-                    if (nx, ny) not in visited and 0 <= nx < self.nodes_x and 0 <= ny < self.nodes_y:
-                        if static_costmap[nx, ny] < 1000000:
-                            visited.add((nx, ny))
-                            queue.append((nx, ny))
+                
+                # BFS 擴散
+                if abs(gx - start_grid[0]) < max_dist_grids and abs(gy - start_grid[1]) < max_dist_grids:
+                    for dx, dy in [(0,1),(0,-1),(1,0),(-1,0)]:
+                        nx, ny = gx + dx, gy + dy
+                        if (nx, ny) not in current_visited and 0 <= nx < self.nodes_x and 0 <= ny < self.nodes_y:
+                            if static_costmap[nx, ny] < 1000000:
+                                current_visited.add((nx, ny))
+                                current_queue.append((nx, ny))
         return None
