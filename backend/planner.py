@@ -129,7 +129,8 @@ class AStarPlanner:
                         if not is_footprint_safe: break
                     
                     if is_footprint_safe:
-                        if (wx - start_pos[0])**2 + (wy - start_pos[1])**2 > 1200**2:
+                        # 核心優化：最小逃逸位移提高到 5公尺，確保一次大跨度撤離
+                        if (wx - start_pos[0])**2 + (wy - start_pos[1])**2 > 5000**2:
                             return (wx, wy)
             
             # 繼續 BFS 擴散
