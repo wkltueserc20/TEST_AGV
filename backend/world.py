@@ -4,7 +4,9 @@ import os
 import logging
 import threading
 import numpy as np
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
+
+from agv import AGV
 
 logger = logging.getLogger(__name__)
 
@@ -13,10 +15,11 @@ class World:
         self.width = width
         self.height = height
         self.obstacles: List[Dict[str, Any]] = []
-        self.agvs: Dict[str, Any] = {}
+        self.agvs: Dict[str, AGV] = {}
         self.path_occupancy: Dict[str, List[Tuple[float, float]]] = {}
-        self.reserved_havens: Dict[str, Tuple[float, float]] = {} # 新增：避難點預約
+        self.reserved_havens: Dict[str, Tuple[float, float]] = {} 
         self.storage_file = "obstacles.json"
+        self.agvs_storage_file = "agvs.json"
         
         self.grid_res = 200.0
         self.nx = int(width // self.grid_res)
@@ -25,9 +28,10 @@ class World:
         self.static_costmap = np.zeros((self.nx, self.ny))
         self._map_lock = threading.Lock()
         self._is_updating = False
-        self._needs_recompute = False # 記錄是否在計算中又有新的變動
+        self._needs_recompute = False 
         
         self.load_obstacles()
+        self.load_agvs()
 
     def save_obstacles(self):
         try:
@@ -50,10 +54,32 @@ class World:
                 self.obstacles = []
         self.update_static_costmap()
 
+    def save_agvs(self):
+        """將所有 AGV 狀態儲存至 JSON (記憶功能)"""
+        try:
+            data = {}
+            for aid, a in self.agvs.items():
+                data[aid] = a.to_dict()
+            with open(self.agvs_storage_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save AGVs: {e}")
+
+    def load_agvs(self):
+        """從 JSON 恢復 AGV 狀態"""
+        if os.path.exists(self.agvs_storage_file):
+            try:
+                with open(self.agvs_storage_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                for aid, state in data.items():
+                    self.agvs[aid] = AGV(aid, state["x"], state["y"], state["theta"], state_dict=state)
+                logger.info(f"Loaded {len(self.agvs)} AGVs from memory.")
+            except Exception as e:
+                logger.error(f"Failed to load AGVs: {e}")
+                self.agvs = {}
+
     def update_static_costmap(self):
-        """觸發地圖重算，支援併發請求"""
         if self._is_updating:
-            # 如果正在算，標記「算完後要再算一次最新版」
             self._needs_recompute = True
             return
         
@@ -97,7 +123,6 @@ class World:
             logger.error(f"Costmap failed: {e}")
         finally:
             self._is_updating = False
-            # 核心修正：如果計算期間又有新變動，立刻再啟動一輪
             if self._needs_recompute:
                 self.update_static_costmap()
 
@@ -105,7 +130,6 @@ class World:
         self.obstacles.append(ob); self.save_obstacles()
 
     def remove_obstacle(self, ob_id: str):
-        # 修正：更安全的 ID 比對
         if not ob_id: return
         original_count = len(self.obstacles)
         self.obstacles = [o for o in self.obstacles if str(o.get("id")) != str(ob_id)]

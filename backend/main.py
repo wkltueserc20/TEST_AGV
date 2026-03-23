@@ -23,16 +23,18 @@ world = World()
 world_lock = threading.Lock()
 cmd_queue = queue.Queue()
 
+# 注意：World 初始化時會呼叫 load_agvs()，所以這裡不需要 init_id 的手動創建，除非是全新環境
 with world_lock:
-    init_id = f"AGV-{str(uuid.uuid4())[:4].upper()}"
-    world.agvs[init_id] = AGV(init_id, 5000.0, 5000.0)
+    if not world.agvs:
+        init_id = f"AGV-{str(uuid.uuid4())[:4].upper()}"
+        world.agvs[init_id] = AGV(init_id, 5000.0, 5000.0)
+        world.save_agvs()
 
 def get_snapshot():
     with world_lock:
         agvs_data = []
         for a in world.agvs.values():
             d = a.to_dict()
-            # 抽稀路徑以減少通訊量 (每 3 個點取 1 個)
             if d.get("path"):
                 d["path"] = d["path"][::3]
             agvs_data.append(d)
@@ -85,6 +87,7 @@ def process_commands():
                 elif t == "add_agv":
                     new_id = f"AGV-{str(uuid.uuid4())[:4].upper()}"
                     world.agvs[new_id] = AGV(new_id, msg.get("x", 5000), msg.get("y", 5000))
+                    world.save_agvs()
                 elif t == "add_obstacle":
                     world.add_obstacle(msg.get("data"))
                     for a in world.agvs.values(): a.replan_needed = True
@@ -101,17 +104,22 @@ def process_commands():
                         for a in world.agvs.values(): a.replan_needed = True
                 elif target_id and target_id in world.agvs:
                     a = world.agvs[target_id]
-                    if t == "start": a.is_running = True; a.replan_needed = True
-                    elif t == "pause": a.is_running = False
-                    elif t == "remove_agv": del world.agvs[target_id]
+                    if t == "start": 
+                        a.is_running = True; a.replan_needed = True; world.save_agvs()
+                    elif t == "pause": 
+                        a.is_running = False; world.save_agvs()
+                    elif t == "remove_agv": 
+                        del world.agvs[target_id]
+                        world.save_agvs()
                     elif t == "reset":
                         a.x, a.y, a.theta = 5000.0, 5000.0, 0.0
                         a.v, a.omega, a.l_rpm, a.r_rpm = 0.0, 0.0, 0.0, 0.0
                         a.is_running = False; a.global_path = []
+                        world.save_agvs()
                     elif t == "set_target":
-                        a.target = msg.get("data"); a.replan_needed = True
+                        a.target = msg.get("data"); a.replan_needed = True; world.save_agvs()
                     elif t == "set_speed":
-                        a.max_rpm = float(msg.get("data", 3000))
+                        a.max_rpm = float(msg.get("data", 3000)); world.save_agvs()
         except Exception as e:
             logger.error(f"Error processing command {t}: {e}")
 
@@ -129,10 +137,17 @@ def physics_engine_thread():
             time.sleep(real_dt - elapsed)
 
 async def telemetry_broadcaster():
+    last_save_time = time.time()
     while True:
         start_time = asyncio.get_event_loop().time()
         snapshot = get_snapshot()
         await manager.broadcast({"type": "telemetry", "data": snapshot})
+        
+        # 每 5 秒自動儲存一次 AGV 位置 (記憶功能)
+        if time.time() - last_save_time > 5.0:
+            world.save_agvs()
+            last_save_time = time.time()
+
         elapsed = asyncio.get_event_loop().time() - start_time
         await asyncio.sleep(max(0.01, 0.033 - elapsed))
 
