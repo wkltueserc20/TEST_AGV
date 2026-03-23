@@ -1,52 +1,39 @@
 ## Context
 
-The system currently uses a mix of hardcoded evasion strategies (reverse 5m, find junction). This leads to brittle behavior in complex layouts. We are moving to a unified model where evasion is simply "moving to the nearest safe coordinates" using the existing A* navigation pipeline.
+Moving from hardcoded reactive rules to a unified model where evasion is "moving to the nearest coordinates that are outside of everyone's planned trajectory."
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Consolidate evasion logic into a single "Search -> Plan -> Move" flow.
-- Ensure evasion targets are physically valid (using the 1000x1000mm footprint).
-- Proactively trigger evasion based on projected path overlaps.
-- Visualize evasion targets for debugging.
-
-**Non-Goals:**
-- Modifying the underlying A* implementation (we use it as-is).
-- Implementing a centralized traffic manager (logic remains decentralized).
+- Consolidate evasion into a "One-Shot" Search -> Plan -> Move flow.
+- Ensure targets are outside of the **entire** future path of oncoming traffic.
+- Use a strict 2.0m safety margin from walls and paths.
 
 ## Decisions
 
-### 1. BFS Safe-Spot Finder
-In `planner.py`, we will implement `find_nearest_safe_spot(start_pos, static_costmap, threat_paths)`:
-- **Search Method**: Breadth-First Search starting from the AGV's current grid cell.
+### 1. BFS Safe-Spot Finder (V8 Optimized)
+In `planner.py`:
+- **Search Method**: BFS with a **25-meter** radius.
 - **Safety Criteria**: 
-    - No intersection with `static_costmap` (wall/obstacle).
-    - No intersection with any point in `threat_paths` (projected trajectories of other AGVs).
-    - Grid cell must accommodate the 1000x1000mm footprint (3x3 grid cells).
-- **Radius**: Search up to 10 meters from origin.
+    - `static_costmap == 0` (strictly > 2m from walls).
+    - **Circular Exclusion**: Distance to any point in `threat_paths` > 2000mm.
+    - **Footprint**: 5x5 grid check (1000x1000mm) must be clear of static walls.
+- **Directional Bias**: Filters points that are in the "threat direction" using dot product.
 
-### 2. State Machine Simplification
-The AGV states will be strictly:
-- `IDLE`: Not moving, monitoring for repulsion.
-- `MISSION`: Moving toward a user-defined goal.
-- `EVADING`: Moving toward a temporary safe spot.
-- `STUCK`: No path found or blocked by physical geometry.
+### 2. Full Trajectory Projection
+In `agv.py`:
+- Moving vehicles update their `path_occupancy` with their **entire** global path.
+- This allows idle vehicles to find a spot that is safe for the duration of the threat's mission.
 
-### 3. Unified Evasion Loop
-In `agv.update`, the logic becomes:
-```python
-if self.status in [IDLE, EVADING]:
-    if self.is_conflicted(world):
-        safe_spot = planner.find_nearest_safe_spot(...)
-        if safe_spot:
-            self.set_target(safe_spot, status=EVADING)
-```
+### 3. Social Braking & Wait
+- Mission vehicles check if an AGV on their path is in `EVADING` status.
+- If so, they **must stop completely** (v=0) to give the evader space.
 
 ### 4. Telemetry & Debug Layer
-- **Backend**: Add `evasion_target` to `AGV.to_dict()`.
-- **Frontend**: Update `SimulatorCanvas.tsx` to render a specific marker (e.g., a dashed purple circle) at the `evasion_target` when the AGV is in `EVADING` state.
+- **Backend**: Broadcast `reserved_havens` mapping.
+- **Frontend**: Render a dashed purple circle and an X at the escape destination.
 
 ## Risks / Trade-offs
 
-- [Risk] BFS search performance in high-speed simulation ➔ Mitigation: Throttle the search to 5Hz or 10Hz; the physics loop remains high-frequency.
-- [Risk] Evasion ping-pong (A moves for B, B then moves for A) ➔ Mitigation: Maintain the priority hierarchy where `MISSION` vehicles have right-of-way over `IDLE`/`EVADING` vehicles.
+- [Risk] Large BFS search time ➔ Mitigation: Run evasion search in a separate background thread (`_async_replan`).
+- [Risk] Deadlock in extremely tight grids ➔ Mitigation: Increase search radius to 25m to find open spaces further away.
