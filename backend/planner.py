@@ -9,33 +9,34 @@ class AStarPlanner:
         self.nodes_x = map_size // grid_size
         self.nodes_y = map_size // grid_size
 
-    def get_path(self, start: List[float], goal: List[float], obstacles: List[Dict[str, Any]], static_costmap=None) -> Tuple[List[Tuple[float, float]], List[Tuple[int, int]]]:
+    def get_path(self, start: List[float], goal: List[float], obstacles: List[Dict[str, Any]], static_costmap=None, world=None) -> Tuple[List[Tuple[float, float]], List[Tuple[int, int]]]:
         start_grid = (int(round(start[0] / self.grid_size)), int(round(start[1] / self.grid_size)))
         goal_grid = (int(round(goal[0] / self.grid_size)), int(round(goal[1] / self.grid_size)))
         
-        dyn_geoms = []
+        # 1. 預過濾動態障礙物：只保留正在移動且非 IDLE 的車輛
+        relevant_dyn_geoms = []
         for ob in obstacles:
+            oid = ob.get('id', '')
+            # 如果對方是待命中的 AGV，在規劃時就「無視」它，逼它避讓
+            if world and oid in world.agvs:
+                if world.agvs[oid].status == "IDLE":
+                    continue 
+            
             if ob.get('radius'):
-                dyn_geoms.append((ob['x'], ob['y'], ob['radius']))
+                relevant_dyn_geoms.append((ob['x'], ob['y'], ob['radius']))
 
         def get_grid_penalty(gx, gy):
             if static_costmap is not None:
-                igx = max(0, min(gx, static_costmap.shape[0]-1))
-                igy = max(0, min(gy, static_costmap.shape[1]-1))
-                penalty = static_costmap[igx, igy]
-            else:
-                penalty = 0
-            
+                penalty = static_costmap[max(0, min(gx, self.nodes_x-1)), max(0, min(gy, self.nodes_y-1))]
+            else: penalty = 0
             if penalty >= 1000000: return penalty
-            # 2. 加入動態障礙物 (其他 AGV)
+            
+            # 加入動態障礙物權重
             wx, wy = gx * self.grid_size, gy * self.grid_size
-            for dx, dy, dr in dyn_geoms:
-                d = math.sqrt((wx - dx)**2 + (wy - dy)**2) - dr
-                # 核心修正：將 AGV 視為「泥沼」而非「高牆」
-                # 之前是 520mm 內 return 1000000.0
-                if d < 520: penalty += 50000.0 
-                elif d < 1500: penalty += (1500.0 / d) ** 4
-
+            for dx, dy, dr in relevant_dyn_geoms:
+                d_sq = (wx - dx)**2 + (wy - dy)**2
+                if d_sq < (dr + 300)**2: # 稍微加大碰撞範圍
+                    penalty += 10000
             return penalty
 
         queue = [(0, 0, start_grid)]
@@ -70,6 +71,7 @@ class AStarPlanner:
             curr = came_from[curr]
         path.reverse()
 
+        # 恢復原始穩定平滑
         if len(path) > 5:
             smooth_path = [path[0]]
             for i in range(1, len(path)-1):
@@ -81,37 +83,61 @@ class AStarPlanner:
             
         return path, visited
 
-    def find_nearest_intersection(self, start_pos: Tuple[float, float], static_costmap) -> Optional[Tuple[float, float]]:
-        """使用 BFS 尋找最近的路口 (節點具備 > 2 個可通行方向)"""
+    def find_nearest_safe_spot(self, start_pos: Tuple[float, float], static_costmap, threat_paths: List[List[Tuple[float, float]]], repulsion_vec: Tuple[float, float] = None) -> Optional[Tuple[float, float]]:
+        """尋找一次到位的完美避難點，使用精確圓形禁區。"""
         if static_costmap is None: return None
         
         start_grid = (int(start_pos[0] // self.grid_size), int(start_pos[1] // self.grid_size))
         queue = [start_grid]
         visited = {start_grid}
+        max_dist_grids = 15000 // self.grid_size 
         
-        # 限制搜尋範圍 (5公尺)
-        max_dist_grids = 5000 // self.grid_size
-        
+        # 1. 建立精確的圓形威脅區 (半徑 2000mm)
+        threat_grids = set()
+        r_grids = 2000 // self.grid_size
+        for path in threat_paths:
+            for px, py in path:
+                tx, ty = int(px // self.grid_size), int(py // self.grid_size)
+                for dx in range(-int(r_grids), int(r_grids) + 1):
+                    for dy in range(-int(r_grids), int(r_grids) + 1):
+                        if dx*dx + dy*dy <= r_grids**2: # 圓形判斷
+                            threat_grids.add((tx + dx, ty + dy))
+
         while queue:
-            curr = queue.pop(0)
+            gx, gy = queue.pop(0)
+            wx, wy = gx * self.grid_size, gy * self.grid_size
             
-            # 檢查是否為路口
-            navigable_neighbors = 0
-            for dx, dy in [(0,1),(0,-1),(1,0),(-1,0)]:
-                nx, ny = curr[0] + dx, curr[1] + dy
-                if 0 <= nx < self.nodes_x and 0 <= ny < self.nodes_y:
-                    if static_costmap[nx, ny] == 0:
-                        navigable_neighbors += 1
+            # 2. 安全原則 (離牆2m) 與 圓形衝突檢查
+            if static_costmap[gx, gy] == 0 and (gx, gy) not in threat_grids:
+                # 3. 定向過濾
+                is_correct_direction = True
+                if repulsion_vec:
+                    vx, vy = wx - start_pos[0], wy - start_pos[1]
+                    v_mag = math.sqrt(vx**2 + vy**2)
+                    if v_mag > 500:
+                        dot = (vx/v_mag) * repulsion_vec[0] + (vy/v_mag) * repulsion_vec[1]
+                        if dot < -0.3: is_correct_direction = False
+                
+                if is_correct_direction:
+                    # 4. 足跡驗證 (1000x1000mm 需要 5x5 網格檢查)
+                    is_footprint_safe = True
+                    for bx in range(-2, 3):
+                        for by in range(-2, 3):
+                            ix, iy = gx + bx, gy + by
+                            if not (0 <= ix < self.nodes_x and 0 <= iy < self.nodes_y) or static_costmap[ix, iy] > 0:
+                                is_footprint_safe = False; break
+                        if not is_footprint_safe: break
+                    
+                    if is_footprint_safe:
+                        if (wx - start_pos[0])**2 + (wy - start_pos[1])**2 > 1200**2:
+                            return (wx, wy)
             
-            if navigable_neighbors > 2: # 發現路口
-                return (curr[0] * self.grid_size, curr[1] * self.grid_size)
-            
-            # 繼續搜尋
-            if abs(curr[0] - start_grid[0]) < max_dist_grids and abs(curr[1] - start_grid[1]) < max_dist_grids:
+            # 繼續 BFS 擴散
+            if abs(gx - start_grid[0]) < max_dist_grids and abs(gy - start_grid[1]) < max_dist_grids:
                 for dx, dy in [(0,1),(0,-1),(1,0),(-1,0)]:
-                    neighbor = (curr[0] + dx, curr[1] + dy)
-                    if neighbor not in visited and 0 <= neighbor[0] < self.nodes_x and 0 <= neighbor[1] < self.nodes_y:
-                        if static_costmap[neighbor[0], neighbor[1]] == 0:
-                            visited.add(neighbor)
-                            queue.append(neighbor)
+                    nx, ny = gx + dx, gy + dy
+                    if (nx, ny) not in visited and 0 <= nx < self.nodes_x and 0 <= ny < self.nodes_y:
+                        if static_costmap[nx, ny] < 1000000:
+                            visited.add((nx, ny))
+                            queue.append((nx, ny))
         return None

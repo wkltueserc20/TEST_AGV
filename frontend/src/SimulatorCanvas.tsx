@@ -257,7 +257,6 @@ const SimulatorCanvas: React.FC<Props> = ({
     if (currentTelemetry.path_occupancy) {
         ctx.save();
         Object.entries(currentTelemetry.path_occupancy).forEach(([id, points]) => {
-            // 使用淡淡的紅色圓圈表示受影響區域
             ctx.fillStyle = 'rgba(255, 77, 77, 0.1)';
             points.forEach(p => {
                 const cp = worldToCanvas(p[0], p[1], w, h, vs);
@@ -265,6 +264,28 @@ const SimulatorCanvas: React.FC<Props> = ({
                 ctx.arc(cp.cx, cp.cy, 800 * scale, 0, Math.PI * 2);
                 ctx.fill();
             });
+        });
+        ctx.restore();
+    }
+
+    // 繪製避難點 (Haven Markers)
+    if (currentTelemetry.reserved_havens) {
+        ctx.save();
+        Object.values(currentTelemetry.reserved_havens).forEach(([hx, hy]) => {
+            const cp = worldToCanvas(hx, hy, w, h, vs);
+            ctx.strokeStyle = '#bb86fc';
+            ctx.setLineDash([5, 5]);
+            ctx.lineWidth = 2 * vs.zoom;
+            ctx.beginPath();
+            ctx.arc(cp.cx, cp.cy, 1000 * scale, 0, Math.PI * 2);
+            ctx.stroke();
+            
+            // 繪製一個紫色的小 X
+            const sz = 10 * vs.zoom;
+            ctx.beginPath();
+            ctx.moveTo(cp.cx - sz, cp.cy - sz); ctx.lineTo(cp.cx + sz, cp.cy + sz);
+            ctx.moveTo(cp.cx + sz, cp.cy - sz); ctx.lineTo(cp.cx - sz, cp.cy + sz);
+            ctx.stroke();
         });
         ctx.restore();
     }

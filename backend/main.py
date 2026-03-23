@@ -46,7 +46,8 @@ def get_snapshot():
             "obstacles": list(world.obstacles),
             "multiplier": SIM_MULTIPLIER,
             "social_links": links,
-            "path_occupancy": {k: v for k, v in world.path_occupancy.items()}
+            "path_occupancy": {k: v for k, v in world.path_occupancy.items()},
+            "reserved_havens": {k: v for k, v in world.reserved_havens.items()}
         }
 
 class ConnectionManager:

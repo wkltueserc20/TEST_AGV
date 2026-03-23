@@ -11,6 +11,7 @@ export interface AGVData {
   path: [number, number][];
   visited?: [number, number][];
   culprit_id?: string;
+  evasion_target?: { x: number; y: number };
 }
 
 export interface SocialLink {
@@ -25,6 +26,7 @@ export interface Telemetry {
   multiplier: number;
   social_links?: SocialLink[];
   path_occupancy?: Record<string, [number, number][]>;
+  reserved_havens?: Record<string, [number, number]>;
 }
 
 export const useSimulation = (url: string) => {

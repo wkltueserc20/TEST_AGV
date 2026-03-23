@@ -45,7 +45,7 @@ class AGVController:
                 return False, oid
         return True, None
 
-    def compute_command(self, x, y, theta, v_curr, omega_curr, target_wp, max_speed, obstacles, margin=525, dt=0.1, ignore_id: str = None) -> Tuple[float, float, Optional[str]]:
+    def compute_command(self, x, y, theta, v_curr, omega_curr, target_wp, max_speed, obstacles, margin=525, dt=0.1, ignore_id: str = None, status: str = None) -> Tuple[float, float, Optional[str]]:
         """
         計算控制指令，支援前進與倒車。
         """
@@ -83,7 +83,15 @@ class AGVController:
                 w = 1.2 if alpha > 0 else -1.2
                 safe, culprit = self.is_pose_safe(x, y, theta + w * 0.1, obstacles, margin=rotate_margin, ignore_id=ignore_id)
                 if safe:
-                    v, w = self.limit_physics(0.0, w, v_curr, omega_curr, max_speed, dt)
+                    v, w = self.limit_physics(0.0, w, v_curr, omega_curr, max_speed, dt, status=status)
+                    return v, w, None
+                return 0.0, 0.0, culprit
+        else:
+            if abs(alpha) > 0.4:
+                w = 1.2 if alpha > 0 else -1.2
+                safe, culprit = self.is_pose_safe(x, y, theta + w * 0.1, obstacles, margin=rotate_margin, ignore_id=ignore_id)
+                if safe:
+                    v, w = self.limit_physics(0.0, w, v_curr, omega_curr, max_speed, dt, status=status)
                     return v, w, None
                 return 0.0, 0.0, culprit
 
@@ -96,10 +104,11 @@ class AGVController:
         if direction > 0: speed = max(50.0, speed)
         else: speed = min(-50.0, speed)
             
-        lookahead = max(distance, 400)
+        # 增加預瞄距離 (從 400 增加到 600)，平滑轉向響應，過濾路徑微小抖動
+        lookahead = max(distance, 600)
         omega = (2.0 * abs(speed) * math.sin(alpha)) / lookahead
         
-        cmd_v, cmd_w = self.limit_physics(speed, omega, v_curr, omega_curr, max_speed, dt)
+        cmd_v, cmd_w = self.limit_physics(speed, omega, v_curr, omega_curr, max_speed, dt, status=status)
         
         # 安全路徑投影檢查
         tx, ty, tt = x, y, theta
@@ -113,8 +122,13 @@ class AGVController:
             
         return cmd_v, cmd_w, None
 
-    def limit_physics(self, v, w, v_curr, w_curr, max_speed, dt):
-        v = np.clip(v, v_curr - self.max_accel * dt, v_curr + self.max_accel * dt)
+    def limit_physics(self, v, w, v_curr, w_curr, max_speed, dt, status=None):
+        # 核心優化：避讓時提供 3 倍加速度，確保瞬間起步
+        accel_limit = self.max_accel
+        if status in ["EVADING", "STUCK"]:
+            accel_limit *= 3.0
+            
+        v = np.clip(v, v_curr - accel_limit * dt, v_curr + accel_limit * dt)
         w = np.clip(w, w_curr - self.max_dyaw_rate * dt, w_curr + self.max_dyaw_rate * dt)
         v_l = v - (w * self.wheel_base / 2.0); v_r = v + (w * self.wheel_base / 2.0)
         max_wheel_v = max(abs(v_l), abs(v_r))

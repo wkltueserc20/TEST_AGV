@@ -15,6 +15,7 @@ class World:
         self.obstacles: List[Dict[str, Any]] = []
         self.agvs: Dict[str, Any] = {}
         self.path_occupancy: Dict[str, List[Tuple[float, float]]] = {}
+        self.reserved_havens: Dict[str, Tuple[float, float]] = {} # 新增：避難點預約
         self.storage_file = "obstacles.json"
         
         self.grid_res = 200.0
@@ -128,6 +129,13 @@ class World:
     def clear_path_occupancy(self, agv_id: str):
         if agv_id in self.path_occupancy:
             del self.path_occupancy[agv_id]
+
+    def reserve_haven(self, agv_id: str, pos: Tuple[float, float]):
+        self.reserved_havens[agv_id] = pos
+
+    def release_haven(self, agv_id: str):
+        if agv_id in self.reserved_havens:
+            del self.reserved_havens[agv_id]
 
     def get_dynamic_obstacles(self, exclude_agv_id: str) -> List[Dict[str, Any]]:
         dyn_obs = []
