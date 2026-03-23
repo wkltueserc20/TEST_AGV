@@ -1,27 +1,26 @@
 ## Why
 
-The current multi-AGV evasion logic is fragmented into numerous special cases, making it difficult to maintain. This change simplifies the system by consolidating all evasion into a single flow: proactively find an absolute "safe spot" that doesn't conflict with anyone else's **full** projected path, then use the robust A* planner to navigate there.
+The V7 reactive logic was prone to oscillations and "suicidal evasion" in narrow corridors. This V8 upgrade transitions the system to a **Proactive One-Shot Evasion** model. By broadcasting full mission trajectories and identifying safe spots far from any future threat, we eliminate jittery movements and ensure traffic flows smoothly without constant re-planning.
 
 ## What Changes
 
-- **BREAKING**: Removed legacy reactive evasion methods (`check_proactive_evasion`, `trigger_evasion`, etc.).
-- **Full Path Intent Broadcast**: Moving AGVs now broadcast their **entire remaining trajectory** instead of just a short segment.
-- **Unified Safe-Spot Search**: Implemented a BFS-based search in the planner to find the nearest point that is physically safe (cost=0) and does not intersect with any other AGV's full trajectory (using a **2.0m circular buffer**).
-- **A* Driven Evasion**: Evasion is treated as a standard navigation task to a temporary "Safe Spot" target.
-- **One-Shot Locking**: Once an AGV starts evading, it locks its target until arrival to prevent jittery oscillations.
-- **Evasion Visualization**: Render the "Safe Spot" target (purple X) on the canvas for debugging.
+- **Full-Trajectory Projection**: Moving AGVs broadcast their entire remaining path to the World occupancy map.
+- **One-Shot Decision Locking**: Idle AGVs trigger a single, decisive evasion maneuver to a distant safe spot and lock that status until arrival.
+- **Circular Threat Zones**: Improved threat detection using a precise 2.0m circular radius to prevent over-evasion in diagonal paths.
+- **Hierarchical Social Braking**: Mission vehicles now wait completely (v=0) for any AGV currently in `EVADING` status.
+- **Performance Downsampling**: Telemetry data is downsampled (1/3 for paths, 1/5 for occupancy) to maintain 60FPS visuals during multi-AGV scenarios.
 
 ## Capabilities
 
 ### New Capabilities
-- `safe-spot-search`: BFS algorithm with 25m range and footprint validation.
-- `evasion-visualization`: Real-time rendering of `reserved_havens`.
+- `safe-spot-search`: High-performance BFS with 25m range, circular exclusion, and 1000mm footprint validation.
+- `directional-locking`: State machine logic that prevents interruption of active evasion tasks.
 
 ### Modified Capabilities
-- `swarm-intelligence`: Goal-oriented proactive model using full path projection.
+- `telemetry-broadcast`: Adaptive downsampling for high-density path data.
 
 ## Impact
 
-- `backend/agv.py`: Rewrite evasion trigger and state transitions.
-- `backend/planner.py`: Add `find_nearest_safe_spot` with circular exclusion.
-- `backend/main.py`: Broadcast `reserved_havens`.
+- `backend/agv.py`: Central logic for state transitions and intent broadcasting.
+- `backend/planner.py`: Optimized BFS and A* with trajectory awareness.
+- `backend/main.py`: Synchronized telemetry broadcasting.
