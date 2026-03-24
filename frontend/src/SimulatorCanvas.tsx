@@ -15,6 +15,10 @@ interface Props {
 const MAP_SIZE = 50000;
 const GRID_SIZE = 200; 
 
+// 工業站點圖示 (Option C: 廠房俯視圖符號)
+const STATION_PATH = "M -50,-50 L 50,-50 L 50,-20 L 40,-20 L 40,20 L 50,20 L 50,50 L -50,50 L -50,20 L -40,20 L -40,-20 L -50,-20 Z";
+const stationPath2D = new Path2D(STATION_PATH);
+
 const SimulatorCanvas: React.FC<Props> = ({ 
   telemetry, selectedAgvId, selectedObstacleId, showSearch,
   onCanvasClick, onCanvasDoubleClick, onCanvasRightClick, onAgvSelect 
@@ -115,7 +119,7 @@ const SimulatorCanvas: React.FC<Props> = ({
     const vs = viewState;
     const scale = (w / MAP_SIZE) * vs.zoom;
 
-    // --- 1. 更新 AGV 動畫狀態 ---
+    // 更新動畫狀態
     currentTelemetry.agvs.forEach(a => {
       if (!displayStates.current[a.id]) {
         displayStates.current[a.id] = { x: a.x, y: a.y, theta: a.theta, lastUpdate: now };
@@ -139,14 +143,13 @@ const SimulatorCanvas: React.FC<Props> = ({
       }
     });
 
-    // --- 2. 背景繪製 ---
     ctx.fillStyle = '#0d0e12';
     ctx.fillRect(0, 0, w, h);
 
+    // 繪製地圖邊界與網格
     const pTopLeft = worldToCanvas(0, MAP_SIZE, w, h, vs);
     const pBottomRight = worldToCanvas(MAP_SIZE, 0, w, h, vs);
-    ctx.strokeStyle = '#2d333b';
-    ctx.lineWidth = Math.max(1, 2 * vs.zoom);
+    ctx.strokeStyle = '#2d333b'; ctx.lineWidth = Math.max(1, 2 * vs.zoom);
     ctx.strokeRect(pTopLeft.cx, pTopLeft.cy, pBottomRight.cx - pTopLeft.cx, pBottomRight.cy - pTopLeft.cy);
 
     ctx.fillStyle = '#3a3f4b';
@@ -180,53 +183,40 @@ const SimulatorCanvas: React.FC<Props> = ({
         }
     }
 
-    // --- 3. 目標與路徑繪製 ---
+    // --- 3. 目標、路徑、預演、社交連結 ---
     currentTelemetry.agvs.forEach(a => {
       const isSelected = a.id === currentSelectedAgvId;
       const { cx, cy } = worldToCanvas(a.target.x, a.target.y, w, h, vs);
-      
-      // 繪製目標點
       ctx.save(); ctx.translate(cx, cy);
       const pulse = Math.max(0.1, (1 + Math.sin(now / 200) * 0.15) * vs.zoom);
-      ctx.strokeStyle = isSelected ? '#39ff14' : '#1b5e20';
-      ctx.lineWidth = 2 * vs.zoom;
+      ctx.strokeStyle = isSelected ? '#39ff14' : '#1b5e20'; ctx.lineWidth = 2 * vs.zoom;
       ctx.beginPath(); ctx.arc(0, 0, 12 * pulse, 0, Math.PI * 2); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(-15*vs.zoom, 0); ctx.lineTo(15*vs.zoom, 0); ctx.moveTo(0, -15*vs.zoom); ctx.lineTo(0, 15*vs.zoom); ctx.stroke();
       ctx.restore();
 
-      // 繪製路徑
       if (isSelected && a.path) {
-        ctx.save();
-        ctx.setLineDash([5, 5]);
-        ctx.strokeStyle = '#ff4d4d';
-        ctx.lineWidth = 2 * vs.zoom;
-        ctx.shadowBlur = 10; ctx.shadowColor = '#ff4d4d';
-        ctx.beginPath();
+        ctx.save(); ctx.setLineDash([5, 5]); ctx.strokeStyle = '#ff4d4d'; ctx.lineWidth = 2 * vs.zoom;
+        ctx.shadowBlur = 10; ctx.shadowColor = '#ff4d4d'; ctx.beginPath();
         a.path.forEach((p, i) => {
           const cp = worldToCanvas(p[0], p[1], w, h, vs);
           if (i === 0) ctx.moveTo(cp.cx, cp.cy); else ctx.lineTo(cp.cx, cp.cy);
         });
-        ctx.stroke();
-        ctx.restore();
+        ctx.stroke(); ctx.restore();
       }
     });
 
-    // --- 3.5 繪製路徑預演 (Path Occupancy / Repulsion Zones) ---
     if (currentTelemetry.path_occupancy) {
         ctx.save();
         Object.entries(currentTelemetry.path_occupancy).forEach(([id, points]) => {
             ctx.fillStyle = 'rgba(255, 77, 77, 0.08)';
             points.forEach(p => {
                 const cp = worldToCanvas(p[0], p[1], w, h, vs);
-                ctx.beginPath();
-                ctx.arc(cp.cx, cp.cy, 800 * scale, 0, Math.PI * 2);
-                ctx.fill();
+                ctx.beginPath(); ctx.arc(cp.cx, cp.cy, 800 * scale, 0, Math.PI * 2); ctx.fill();
             });
         });
         ctx.restore();
     }
 
-    // --- 3.6 繪製社交連結 (Yielding / Waiting Lines) ---
     if (currentTelemetry.social_links) {
         currentTelemetry.social_links.forEach(link => {
             const fromAgv = currentTelemetry.agvs.find(a => a.id === link.from);
@@ -234,49 +224,42 @@ const SimulatorCanvas: React.FC<Props> = ({
             if (fromAgv && toAgv) {
                 const p1 = worldToCanvas(fromAgv.x, fromAgv.y, w, h, vs);
                 const p2 = worldToCanvas(toAgv.x, toAgv.y, w, h, vs);
-                ctx.save();
-                ctx.setLineDash([5, 5]);
+                ctx.save(); ctx.setLineDash([5, 5]);
                 const color = link.type === 'WAITING' ? 'rgba(255, 152, 0, 0.6)' : 'rgba(187, 134, 252, 0.6)';
-                ctx.strokeStyle = color;
-                ctx.lineWidth = 2 * vs.zoom;
+                ctx.strokeStyle = color; ctx.lineWidth = 2 * vs.zoom;
                 ctx.beginPath(); ctx.moveTo(p1.cx, p1.cy); ctx.lineTo(p2.cx, p2.cy); ctx.stroke();
                 const angle = Math.atan2(p2.cy - p1.cy, p2.cx - p1.cx);
                 ctx.translate(p2.cx - Math.cos(angle) * 30 * vs.zoom, p2.cy - Math.sin(angle) * 30 * vs.zoom);
-                ctx.rotate(angle);
-                ctx.fillStyle = color;
+                ctx.rotate(angle); ctx.fillStyle = color;
                 ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-10 * vs.zoom, -5 * vs.zoom); ctx.lineTo(-10 * vs.zoom, 5 * vs.zoom); ctx.fill();
                 ctx.restore();
             }
         });
     }
 
-    // --- 4. 靜態障礙物繪製 ---
+    // --- 4. 靜態障礙物 (牆壁與圓形) ---
     currentTelemetry.obstacles.filter(ob => ob.type !== 'equipment').forEach(ob => {
       const { cx, cy } = worldToCanvas(ob.x, ob.y, w, h, vs);
       const isSelected = currentSelectedObId === ob.id;
       ctx.save(); ctx.translate(cx, cy);
       if (ob.type === 'circle') {
           const r = Math.max(0.1, (ob.radius || 500) * scale);
-          ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37';
-          ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37'; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
           ctx.restore(); ctx.save(); ctx.translate(cx, cy);
-          ctx.strokeStyle = isSelected ? '#fff' : '#ffd700';
-          ctx.lineWidth = 1.5 * vs.zoom;
+          ctx.strokeStyle = isSelected ? '#fff' : '#ffd700'; ctx.lineWidth = 1.5 * vs.zoom;
           ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
       } else {
           ctx.rotate(-ob.angle);
           const ow = ob.width * scale, oh = ob.height * scale;
-          ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37';
-          ctx.fillRect(-ow/2, -oh/2, ow, oh);
+          ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37'; ctx.fillRect(-ow/2, -oh/2, ow, oh);
           ctx.restore(); ctx.save(); ctx.translate(cx, cy); ctx.rotate(-ob.angle);
-          ctx.strokeStyle = isSelected ? '#fff' : '#ffd700';
-          ctx.lineWidth = 1.5 * vs.zoom;
+          ctx.strokeStyle = isSelected ? '#fff' : '#ffd700'; ctx.lineWidth = 1.5 * vs.zoom;
           ctx.strokeRect(-ow/2, -oh/2, ow, oh);
       }
       ctx.restore();
     });
 
-    // --- 5. AGV 本體繪製 ---
+    // --- 5. AGV 本體 ---
     currentTelemetry.agvs.forEach(a => {
       const ds = displayStates.current[a.id];
       if (!ds) return;
@@ -295,46 +278,46 @@ const SimulatorCanvas: React.FC<Props> = ({
       ctx.beginPath(); ctx.arc(0, 0, Math.max(0.1, sz/4), 0, Math.PI * 2); ctx.fillStyle = '#333'; ctx.fill();
       ctx.fillStyle = isSelected ? '#00f2ff' : '#aaa';
       ctx.beginPath(); ctx.moveTo(sz/2 - 5*vs.zoom, 0); ctx.lineTo(sz/2 - 15*vs.zoom, -10*vs.zoom); ctx.lineTo(sz/2 - 15*vs.zoom, 10*vs.zoom); ctx.fill();
-      ctx.restore();
+      
+      // 恢復狀態 LED 燈
+      const ledColor = a.is_running ? '#00ff00' : (a.is_planning ? '#ffc107' : '#ff3333');
+      ctx.beginPath(); ctx.arc(-sz/2 + 15*vs.zoom, -sz/2 + 15*vs.zoom, Math.max(0.1, 4*vs.zoom), 0, Math.PI * 2);
+      ctx.fillStyle = ledColor; ctx.shadowBlur = 8; ctx.shadowColor = ledColor; ctx.fill();
+      ctx.shadowBlur = 0; ctx.restore();
+      
       ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(8, 11 * vs.zoom)}px monospace`;
       ctx.fillText(a.id, cx - 20, cy - sz * 0.7);
     });
 
-    // --- 6. 設備 (星星) 在最上層 ---
-    const drawStar = (ctx: CanvasRenderingContext2D, cx: number, cy: number, spikes: number, outerRadius: number, innerRadius: number) => {
-      let rot = Math.PI / 2 * 3;
-      let step = Math.PI / spikes;
-      ctx.beginPath(); ctx.moveTo(cx, cy - outerRadius)
-      for (let i = 0; i < spikes; i++) {
-        ctx.lineTo(cx + Math.cos(rot) * outerRadius, cy + Math.sin(rot) * outerRadius); rot += step;
-        ctx.lineTo(cx + Math.cos(rot) * innerRadius, cy + Math.sin(rot) * innerRadius); rot += step;
-      }
-      ctx.lineTo(cx, cy - outerRadius); ctx.closePath();
-    };
-
+    // --- 6. 設備 (專用工業圖標) 在最上層 ---
     currentTelemetry.obstacles.filter(ob => ob.type === 'equipment').forEach(ob => {
       const { cx, cy } = worldToCanvas(ob.x, ob.y, w, h, vs);
       const isSelected = currentSelectedObId === ob.id;
       const size = (ob.radius || 1000) * scale;
       const colors: Record<string, string> = { 'normal': '#ffd700', 'running': '#39ff14', 'error': '#ff4d4d' };
       const baseColor = colors[ob.status || 'running'] || '#39ff14';
+      
       ctx.save(); ctx.translate(cx, cy);
-      ctx.globalAlpha = 0.7; ctx.fillStyle = isSelected ? '#ff6600' : baseColor;
-      drawStar(ctx, 0, 0, 5, size, size * 0.45); ctx.fill();
-      ctx.globalAlpha = 1.0; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5 * vs.zoom;
-      ctx.stroke();
+      const iconScale = size / 50; ctx.scale(iconScale, iconScale);
+      ctx.globalAlpha = 0.7; ctx.fillStyle = isSelected ? '#ff6600' : baseColor; ctx.fill(stationPath2D);
+      ctx.globalAlpha = 1.0; ctx.strokeStyle = '#fff'; ctx.lineWidth = (1.5 * vs.zoom) / iconScale;
+      if (isSelected) { ctx.shadowBlur = 15; ctx.shadowColor = '#ff6600'; }
+      ctx.stroke(stationPath2D);
+      ctx.beginPath(); ctx.arc(0, 0, 5 / iconScale, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.restore();
+      
       if (ob.docking_angle !== undefined) {
+          ctx.save(); ctx.translate(cx, cy);
           const angleRad = (ob.docking_angle * Math.PI) / 180;
-          // 指向入口：旋轉角度加 PI
           ctx.rotate(-angleRad + Math.PI); ctx.strokeStyle = '#00f2ff'; ctx.lineWidth = 2 * vs.zoom;
           ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(size * 0.8, 0);
-          ctx.lineTo(size * 0.6, -size * 0.1); ctx.moveTo(size * 0.8, 0);
-          ctx.lineTo(size * 0.6, size * 0.1); ctx.stroke();
+          ctx.lineTo(size * 0.6, -size * 0.1); ctx.moveTo(size * 0.8, 0); ctx.lineTo(size * 0.6, size * 0.1); ctx.stroke();
+          ctx.restore();
       }
-
-      ctx.restore();
+      ctx.save(); ctx.translate(cx, cy);
       ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(10, 12 * vs.zoom)}px monospace`;
-      ctx.textAlign = 'center'; ctx.fillText(ob.id, cx, cy - size - 10 * vs.zoom);
+      ctx.textAlign = 'center'; ctx.fillText(ob.id, 0, -size - 10 * vs.zoom);
+      ctx.restore();
     });
 
     animationFrameId.current = requestAnimationFrame(render);
