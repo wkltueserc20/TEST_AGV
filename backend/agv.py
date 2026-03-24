@@ -58,6 +58,7 @@ class AGV:
         self.has_goods = False
         self.current_task: Optional[Dict[str, Any]] = None
         self.task_timer = 0.0
+        self._last_closest_idx = 0
 
         if state_dict:
             self.x = state_dict.get("x", self.x); self.y = state_dict.get("y", self.y)
@@ -92,12 +93,12 @@ class AGV:
                     self.evasion_target = {"x": safe_spot[0], "y": safe_spot[1]}
                     self.target = self.evasion_target
                     path, visited = self.planner.get_path([self.x, self.y], [self.target["x"], self.target["y"]], obstacles, static_costmap=static_costmap, world=world)
-                    self.global_path = path; self.is_running = True; self.status = AGVStatus.EVADING
+                    self.global_path = path; self._last_closest_idx = 0; self.is_running = True; self.status = AGVStatus.EVADING
                 else: self.status = AGVStatus.STUCK
                 return
             path, visited = self.planner.get_path([self.x, self.y], [self.target["x"], self.target["y"]], obstacles, static_costmap=static_costmap, world=world)
-            if not path: self.global_path = []; return
-            self.global_path = path; self.visited_nodes = visited
+            if not path: self.global_path = []; self._last_closest_idx = 0; return
+            self.global_path = path; self._last_closest_idx = 0; self.visited_nodes = visited
             if self.status != AGVStatus.EVADING:
                 self.status = AGVStatus.EXECUTING if self.is_running else AGVStatus.IDLE
         finally:
@@ -142,12 +143,22 @@ class AGV:
             if self.status != AGVStatus.LOADING and self.status != AGVStatus.UNLOADING:
                 self.check_proactive_evasion(world)
 
+        # --- 效能優化：單次 O(1) 路徑索引搜尋 ---
+        closest_idx = self._last_closest_idx
+        if self.global_path:
+            min_dist = float("inf")
+            # 只在上次最近點附近往前尋找 (窗口大小 20)
+            search_end = min(len(self.global_path), self._last_closest_idx + 20)
+            for i in range(self._last_closest_idx, search_end):
+                d = (self.global_path[i][0] - self.x)**2 + (self.global_path[i][1] - self.y)**2
+                if d < min_dist:
+                    min_dist = d
+                    closest_idx = i
+            # 更新快取
+            self._last_closest_idx = closest_idx
+
         # 3. 路徑佔用發布
         if self.global_path and self.is_running:
-            min_dist = float("inf"); closest_idx = 0
-            for i, wp in enumerate(self.global_path):
-                d = (wp[0]-self.x)**2 + (wp[1]-self.y)**2
-                if d < min_dist: min_dist = d; closest_idx = i
             world.update_path_occupancy(self.id, self.global_path[closest_idx :])
         else: world.clear_path_occupancy(self.id)
 
@@ -158,11 +169,6 @@ class AGV:
         if self._last_compute_time >= 0.05:
             self._last_compute_time = 0.0
             all_obs = world.obstacles + world.get_dynamic_obstacles(exclude_agv_id=self.id)
-            
-            min_dist = float("inf"); closest_idx = 0
-            for i, wp in enumerate(self.global_path):
-                d = (wp[0]-self.x)**2 + (wp[1]-self.y)**2
-                if d < min_dist: min_dist = d; closest_idx = i
             
             lookahead = max(1, int(4 + abs(self.v) / 100.0))
             target_wp = self.global_path[min(closest_idx + lookahead, len(self.global_path)-1)]
@@ -239,8 +245,9 @@ class AGV:
             # --- 關鍵修正 1：擴大掃描範圍，實現「提前閃車」 ---
             # 檢查對方前方 100 個路徑點 (約 20 米) 是否會經過我目前的位置
             # 只要對方路徑會穿過我 2.5 米內，我就必須讓路
+            # 效能優化：使用平方距離避免 math.sqrt
             for px, py in path_points[:100]: 
-                if math.sqrt((px - self.x)**2 + (py - self.y)**2) < 2500:
+                if (px - self.x)**2 + (py - self.y)**2 < 6250000: # 2500**2
                     logger.info(f"AGV {self.id} is in the way of {other_id}'s path. Triggering proactive evasion.")
                     self.trigger_evasion(world)
                     return True

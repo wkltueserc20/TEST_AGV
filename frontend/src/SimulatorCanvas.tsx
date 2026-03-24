@@ -5,7 +5,7 @@ interface Props {
   telemetry: Telemetry | null;
   selectedAgvId: string | null;
   selectedObstacleId: string | null;
-  autoTaskSourceId: string | null; // 新增：AUTO 模式選中的起點
+  autoTaskSourceId: string | null;
   showSearch: boolean;
   onCanvasClick: (x: number, y: number) => void;
   onCanvasDoubleClick: (x: number, y: number) => void;
@@ -16,7 +16,7 @@ interface Props {
 const MAP_SIZE = 50000;
 const GRID_SIZE = 200; 
 
-// 工業站點圖示 (Option C: 廠房俯視圖符號)
+// 工業站點圖示路徑
 const STATION_PATH = "M -50,-50 L 50,-50 L 50,-20 L 40,-20 L 40,20 L 50,20 L 50,50 L -50,50 L -50,20 L -40,20 L -40,-20 L -50,-20 Z";
 const stationPath2D = new Path2D(STATION_PATH);
 
@@ -26,23 +26,37 @@ const SimulatorCanvas: React.FC<Props> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const staticCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const staticNeedsUpdate = useRef(true);
+
   const [dimensions, setDimensions] = useState({ width: 750, height: 750 });
   const [viewState, setViewState] = useState({ zoom: 1.0, offsetX: 0, offsetY: 0 });
+  
   const isDragging = useRef(false);
   const lastMousePos = useRef({ x: 0, y: 0 });
 
   const telemetryRef = useRef<Telemetry | null>(null);
   const selectedAgvIdRef = useRef<string | null>(null);
   const selectedObstacleIdRef = useRef<string | null>(null);
+  
   const revealedIndices = useRef<Record<string, number>>({});
   const lastSearchFingerprints = useRef<Record<string, string>>({});
+  const displayStates = useRef<Record<string, {x: number, y: number, theta: number, lastUpdate: number}>>({});
+  const animationFrameId = useRef<number>();
 
+  // 同步 Refs
+  useEffect(() => { telemetryRef.current = telemetry; staticNeedsUpdate.current = true; }, [telemetry]);
+  useEffect(() => { selectedAgvIdRef.current = selectedAgvId; }, [selectedAgvId]);
+  useEffect(() => { selectedObstacleIdRef.current = selectedObstacleId; }, [selectedObstacleId]);
+
+  // 處理畫布大小
   useEffect(() => {
     const handleResize = () => {
       if (containerRef.current) {
         const { clientWidth, clientHeight } = containerRef.current;
         const size = Math.min(clientWidth, clientHeight) - 40;
         setDimensions({ width: size, height: size });
+        staticNeedsUpdate.current = true;
       }
     };
     handleResize();
@@ -50,6 +64,7 @@ const SimulatorCanvas: React.FC<Props> = ({
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // 滾輪縮放
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -61,17 +76,11 @@ const SimulatorCanvas: React.FC<Props> = ({
         ...prev, 
         zoom: Math.min(Math.max(prev.zoom + direction * zoomSpeed * prev.zoom, 0.2), 20.0) 
       }));
+      staticNeedsUpdate.current = true;
     };
     canvas.addEventListener('wheel', handleWheelNative, { passive: false });
     return () => canvas.removeEventListener('wheel', handleWheelNative);
   }, []);
-
-  useEffect(() => { telemetryRef.current = telemetry; }, [telemetry]);
-  useEffect(() => { selectedAgvIdRef.current = selectedAgvId; }, [selectedAgvId]);
-  useEffect(() => { selectedObstacleIdRef.current = selectedObstacleId; }, [selectedObstacleId]);
-
-  const displayStates = useRef<Record<string, {x: number, y: number, theta: number, lastUpdate: number}>>({});
-  const animationFrameId = useRef<number>();
 
   const worldToCanvas = useCallback((x: number, y: number, w: number, h: number, vs: any) => {
     const scale = (w / MAP_SIZE) * vs.zoom;
@@ -83,6 +92,7 @@ const SimulatorCanvas: React.FC<Props> = ({
     return { x: (cx - vs.offsetX) / scale, y: (h + vs.offsetY - cy) / scale };
   }, []);
 
+  // --- 事件處理函式 ---
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button === 1 || (e.button === 0 && e.altKey)) {
         isDragging.current = true;
@@ -97,57 +107,30 @@ const SimulatorCanvas: React.FC<Props> = ({
         const dy = e.clientY - lastMousePos.current.y;
         setViewState(prev => ({ ...prev, offsetX: prev.offsetX + dx, offsetY: prev.offsetY + dy }));
         lastMousePos.current = { x: e.clientX, y: e.clientY };
+        staticNeedsUpdate.current = true;
     }
   };
 
   const handleMouseUp = () => { isDragging.current = false; };
 
-  const render = useCallback(() => {
-    const canvas = canvasRef.current;
-    const currentTelemetry = telemetryRef.current;
-    const currentSelectedAgvId = selectedAgvIdRef.current;
-    const currentSelectedObId = selectedObstacleIdRef.current;
+  const handleInteraction = (e: React.MouseEvent<HTMLCanvasElement>, callback: (x: number, y: number) => void) => {
+    const canvas = canvasRef.current; if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const { x, y } = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top, dimensions.width, dimensions.height, viewState);
+    callback(x, y);
+  };
 
-    if (!canvas || !currentTelemetry) {
-        animationFrameId.current = requestAnimationFrame(render);
-        return;
-    }
+  // --- 靜態層繪製 (緩存) ---
+  const updateStaticLayer = (w: number, h: number, vs: any, telemetry: Telemetry | null) => {
+    if (!staticCanvasRef.current) staticCanvasRef.current = document.createElement('canvas');
+    const canvas = staticCanvasRef.current;
+    canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const now = performance.now();
-    const { width: w, height: h } = dimensions;
-    const vs = viewState;
     const scale = (w / MAP_SIZE) * vs.zoom;
+    ctx.fillStyle = '#0d0e12'; ctx.fillRect(0, 0, w, h);
 
-    // 更新動畫狀態
-    currentTelemetry.agvs.forEach(a => {
-      if (!displayStates.current[a.id]) {
-        displayStates.current[a.id] = { x: a.x, y: a.y, theta: a.theta, lastUpdate: now };
-      } else {
-        const ds = displayStates.current[a.id];
-        const dt = (now - ds.lastUpdate) / 1000.0;
-        if (a.is_running) {
-          ds.x += a.v * Math.cos(ds.theta) * dt;
-          ds.y += a.v * Math.sin(ds.theta) * dt;
-          ds.theta += a.omega * dt;
-          ds.x += (a.x - ds.x) * 0.3;
-          ds.y += (a.y - ds.y) * 0.3;
-          let dTheta = a.theta - ds.theta;
-          while (dTheta > Math.PI) dTheta -= Math.PI * 2;
-          while (dTheta < -Math.PI) dTheta += Math.PI * 2;
-          ds.theta += dTheta * 0.3;
-        } else {
-          ds.x = a.x; ds.y = a.y; ds.theta = a.theta;
-        }
-        ds.lastUpdate = now;
-      }
-    });
-
-    ctx.fillStyle = '#0d0e12';
-    ctx.fillRect(0, 0, w, h);
-
-    // 繪製地圖邊界與網格
     const pTopLeft = worldToCanvas(0, MAP_SIZE, w, h, vs);
     const pBottomRight = worldToCanvas(MAP_SIZE, 0, w, h, vs);
     ctx.strokeStyle = '#2d333b'; ctx.lineWidth = Math.max(1, 2 * vs.zoom);
@@ -163,30 +146,86 @@ const SimulatorCanvas: React.FC<Props> = ({
       }
     }
 
-    // --- 2.5 繪製 Search Debug Layer (A* 搜尋軌跡) ---
-    const selectedAgv = currentTelemetry.agvs.find(a => a.id === currentSelectedAgvId);
-    if (showSearch && selectedAgv?.visited) {
-        const fingerprint = `${selectedAgv.visited.length}-${selectedAgv.visited[0] ? selectedAgv.visited[0][0] : 0}`;
-        if (fingerprint !== lastSearchFingerprints.current[selectedAgv.id]) {
-            revealedIndices.current[selectedAgv.id] = 0;
-            lastSearchFingerprints.current[selectedAgv.id] = fingerprint;
-        }
-        if (revealedIndices.current[selectedAgv.id] < selectedAgv.visited.length) {
-            revealedIndices.current[selectedAgv.id] += 100;
-        }
-        ctx.fillStyle = 'rgba(0, 255, 255, 0.08)';
-        const blockSize = GRID_SIZE * scale;
-        const count = revealedIndices.current[selectedAgv.id] || 0;
-        for (let i = 0; i < Math.min(count, selectedAgv.visited.length); i++) {
-            const node = selectedAgv.visited[i];
-            const { cx, cy } = worldToCanvas(node[0] * GRID_SIZE, node[1] * GRID_SIZE, w, h, vs);
-            ctx.fillRect(cx - blockSize/2, cy - blockSize/2, blockSize, blockSize);
+    if (telemetry) {
+        telemetry.obstacles.filter(ob => ob.type !== 'equipment').forEach(ob => {
+            const { cx, cy } = worldToCanvas(ob.x, ob.y, w, h, vs);
+            ctx.save(); ctx.translate(cx, cy);
+            if (ob.type === 'circle') {
+                const r = Math.max(0.1, (ob.radius || 500) * scale);
+                ctx.fillStyle = '#d4af37'; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 1.5 * vs.zoom; ctx.stroke();
+            } else {
+                ctx.rotate(-ob.angle);
+                const ow = ob.width * scale, oh = ob.height * scale;
+                ctx.fillStyle = '#d4af37'; ctx.fillRect(-ow/2, -oh/2, ow, oh);
+                ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 1.5 * vs.zoom; ctx.strokeRect(-ow/2, -oh/2, ow, oh);
+            }
+            ctx.restore();
+        });
+    }
+    staticNeedsUpdate.current = false;
+  };
+
+  const render = useCallback(() => {
+    const canvas = canvasRef.current;
+    const currentTelemetry = telemetryRef.current;
+    const { width: w, height: h } = dimensions;
+    const vs = viewState;
+
+    if (!canvas || !currentTelemetry) {
+        animationFrameId.current = requestAnimationFrame(render);
+        return;
+    }
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const now = performance.now();
+    const scale = (w / MAP_SIZE) * vs.zoom;
+
+    if (staticNeedsUpdate.current) updateStaticLayer(w, h, vs, currentTelemetry);
+    if (staticCanvasRef.current) ctx.drawImage(staticCanvasRef.current, 0, 0);
+
+    // 更新 AGV 動畫狀態
+    currentTelemetry.agvs.forEach(a => {
+      if (!displayStates.current[a.id]) {
+        displayStates.current[a.id] = { x: a.x, y: a.y, theta: a.theta, lastUpdate: now };
+      } else {
+        const ds = displayStates.current[a.id];
+        const dt = (now - ds.lastUpdate) / 1000.0;
+        if (a.is_running) {
+          ds.x += a.v * Math.cos(ds.theta) * dt; ds.y += a.v * Math.sin(ds.theta) * dt; ds.theta += a.omega * dt;
+          ds.x += (a.x - ds.x) * 0.3; ds.y += (a.y - ds.y) * 0.3;
+          let dTheta = a.theta - ds.theta;
+          while (dTheta > Math.PI) dTheta -= Math.PI * 2;
+          while (dTheta < -Math.PI) dTheta += Math.PI * 2;
+          ds.theta += dTheta * 0.3;
+        } else { ds.x = a.x; ds.y = a.y; ds.theta = a.theta; }
+        ds.lastUpdate = now;
+      }
+    });
+
+    if (showSearch) {
+        const selectedAgv = currentTelemetry.agvs.find(a => a.id === selectedAgvIdRef.current);
+        if (selectedAgv?.visited) {
+            const fingerprint = `${selectedAgv.visited.length}-${selectedAgv.visited[0] ? selectedAgv.visited[0][0] : 0}`;
+            if (fingerprint !== lastSearchFingerprints.current[selectedAgv.id]) {
+                revealedIndices.current[selectedAgv.id] = 0;
+                lastSearchFingerprints.current[selectedAgv.id] = fingerprint;
+            }
+            if (revealedIndices.current[selectedAgv.id] < selectedAgv.visited.length) revealedIndices.current[selectedAgv.id] += 100;
+            ctx.fillStyle = 'rgba(0, 255, 255, 0.08)';
+            const blockSize = GRID_SIZE * scale;
+            const count = revealedIndices.current[selectedAgv.id] || 0;
+            for (let i = 0; i < Math.min(count, selectedAgv.visited.length); i++) {
+                const node = selectedAgv.visited[i];
+                const { cx, cy } = worldToCanvas(node[0] * GRID_SIZE, node[1] * GRID_SIZE, w, h, vs);
+                ctx.fillRect(cx - blockSize/2, cy - blockSize/2, blockSize, blockSize);
+            }
         }
     }
 
-    // --- 3. 目標、路徑、預演、社交連結 ---
     currentTelemetry.agvs.forEach(a => {
-      const isSelected = a.id === currentSelectedAgvId;
+      const isSelected = a.id === selectedAgvIdRef.current;
       const { cx, cy } = worldToCanvas(a.target.x, a.target.y, w, h, vs);
       ctx.save(); ctx.translate(cx, cy);
       const pulse = Math.max(0.1, (1 + Math.sin(now / 200) * 0.15) * vs.zoom);
@@ -207,13 +246,12 @@ const SimulatorCanvas: React.FC<Props> = ({
     });
 
     if (currentTelemetry.path_occupancy) {
-        ctx.save();
-        Object.entries(currentTelemetry.path_occupancy).forEach(([id, points]) => {
-            ctx.fillStyle = 'rgba(255, 77, 77, 0.08)';
-            points.forEach(p => {
-                const cp = worldToCanvas(p[0], p[1], w, h, vs);
+        ctx.save(); ctx.fillStyle = 'rgba(255, 77, 77, 0.08)';
+        Object.values(currentTelemetry.path_occupancy).forEach(points => {
+            for (let i = 0; i < points.length; i += 5) {
+                const cp = worldToCanvas(points[i][0], points[i][1], w, h, vs);
                 ctx.beginPath(); ctx.arc(cp.cx, cp.cy, 800 * scale, 0, Math.PI * 2); ctx.fill();
-            });
+            }
         });
         ctx.restore();
     }
@@ -223,77 +261,38 @@ const SimulatorCanvas: React.FC<Props> = ({
             const fromAgv = currentTelemetry.agvs.find(a => a.id === link.from);
             const toAgv = currentTelemetry.agvs.find(a => a.id === link.to);
             if (fromAgv && toAgv) {
-                const p1 = worldToCanvas(fromAgv.x, fromAgv.y, w, h, vs);
-                const p2 = worldToCanvas(toAgv.x, toAgv.y, w, h, vs);
-                ctx.save();
-                ctx.setLineDash([5, 5]);
-                const color = link.type === 'WAITING' ? 'rgba(255, 152, 0, 0.6)' : 'rgba(187, 134, 252, 0.6)';
-                ctx.strokeStyle = color; ctx.lineWidth = 2 * vs.zoom;
-                ctx.beginPath(); ctx.moveTo(p1.cx, p1.cy); ctx.lineTo(p2.cx, p2.cy); ctx.stroke();
+                const p1 = worldToCanvas(fromAgv.x, fromAgv.y, w, h, vs), p2 = worldToCanvas(toAgv.x, toAgv.y, w, h, vs);
+                ctx.save(); ctx.setLineDash([5, 5]); ctx.strokeStyle = link.type === 'WAITING' ? 'rgba(255, 152, 0, 0.6)' : 'rgba(187, 134, 252, 0.6)';
+                ctx.lineWidth = 2 * vs.zoom; ctx.beginPath(); ctx.moveTo(p1.cx, p1.cy); ctx.lineTo(p2.cx, p2.cy); ctx.stroke();
                 const angle = Math.atan2(p2.cy - p1.cy, p2.cx - p1.cx);
                 ctx.translate(p2.cx - Math.cos(angle) * 30 * vs.zoom, p2.cy - Math.sin(angle) * 30 * vs.zoom);
-                ctx.rotate(angle); ctx.fillStyle = color;
+                ctx.rotate(angle); ctx.fillStyle = ctx.strokeStyle;
                 ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-10 * vs.zoom, -5 * vs.zoom); ctx.lineTo(-10 * vs.zoom, 5 * vs.zoom); ctx.fill();
                 ctx.restore();
             }
         });
     }
 
-    // --- 3.7 繪製任務隊列連線 (Mission Links) ---
     if (currentTelemetry.task_queue) {
         currentTelemetry.task_queue.forEach((task: any) => {
             const source = currentTelemetry.obstacles.find(ob => ob.id === task.source_id);
             const target = currentTelemetry.obstacles.find(ob => ob.id === task.target_id);
             if (source && target) {
-                const p1 = worldToCanvas(source.x, source.y, w, h, vs);
-                const p2 = worldToCanvas(target.x, target.y, w, h, vs);
-                ctx.save();
-                ctx.setLineDash([8, 4]);
-                ctx.strokeStyle = task.status === 'ASSIGNED' ? 'rgba(57, 255, 20, 0.4)' : 'rgba(88, 166, 255, 0.4)';
-                ctx.lineWidth = 2 * vs.zoom;
-                ctx.beginPath(); ctx.moveTo(p1.cx, p1.cy); ctx.lineTo(p2.cx, p2.cy); ctx.stroke();
-
-                // 標籤
-                const midX = (p1.cx + p2.cx) / 2;
-                const midY = (p1.cy + p2.cy) / 2;
+                const p1 = worldToCanvas(source.x, source.y, w, h, vs), p2 = worldToCanvas(target.x, target.y, w, h, vs);
+                ctx.save(); ctx.setLineDash([8, 4]); ctx.strokeStyle = task.status === 'ASSIGNED' ? 'rgba(57, 255, 20, 0.4)' : 'rgba(88, 166, 255, 0.4)';
+                ctx.lineWidth = 2 * vs.zoom; ctx.beginPath(); ctx.moveTo(p1.cx, p1.cy); ctx.lineTo(p2.cx, p2.cy); ctx.stroke();
+                const midX = (p1.cx + p2.cx) / 2, midY = (p1.cy + p2.cy) / 2;
                 ctx.fillStyle = task.status === 'ASSIGNED' ? '#39ff14' : '#58a6ff';
-                ctx.font = `bold ${Math.max(10, 11 * vs.zoom)}px monospace`;
-                ctx.textAlign = 'center';
-                ctx.fillText(task.status, midX, midY - 5 * vs.zoom);
-                ctx.restore();
+                ctx.font = `bold ${Math.max(10, 11 * vs.zoom)}px monospace`; ctx.textAlign = 'center';
+                ctx.fillText(task.status, midX, midY - 5 * vs.zoom); ctx.restore();
             }
         });
     }
 
-
-    // --- 4. 靜態障礙物 (牆壁與圓形) ---
-    currentTelemetry.obstacles.filter(ob => ob.type !== 'equipment').forEach(ob => {
-      const { cx, cy } = worldToCanvas(ob.x, ob.y, w, h, vs);
-      const isSelected = currentSelectedObId === ob.id;
-      ctx.save(); ctx.translate(cx, cy);
-      if (ob.type === 'circle') {
-          const r = Math.max(0.1, (ob.radius || 500) * scale);
-          ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37'; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
-          ctx.restore(); ctx.save(); ctx.translate(cx, cy);
-          ctx.strokeStyle = isSelected ? '#fff' : '#ffd700'; ctx.lineWidth = 1.5 * vs.zoom;
-          ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
-      } else {
-          ctx.rotate(-ob.angle);
-          const ow = ob.width * scale, oh = ob.height * scale;
-          ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37'; ctx.fillRect(-ow/2, -oh/2, ow, oh);
-          ctx.restore(); ctx.save(); ctx.translate(cx, cy); ctx.rotate(-ob.angle);
-          ctx.strokeStyle = isSelected ? '#fff' : '#ffd700'; ctx.lineWidth = 1.5 * vs.zoom;
-          ctx.strokeRect(-ow/2, -oh/2, ow, oh);
-      }
-      ctx.restore();
-    });
-
-    // --- 5. AGV 本體 ---
     currentTelemetry.agvs.forEach(a => {
-      const ds = displayStates.current[a.id];
-      if (!ds) return;
+      const ds = displayStates.current[a.id]; if (!ds) return;
       const { cx, cy } = worldToCanvas(ds.x, ds.y, w, h, vs);
-      const isSelected = a.id === currentSelectedAgvId;
+      const isSelected = a.id === selectedAgvIdRef.current;
       const sz = 1000 * scale;
       ctx.save(); ctx.translate(cx, cy); ctx.rotate(-ds.theta);
       let strokeColor = isSelected ? '#00f2ff' : '#555';
@@ -307,100 +306,52 @@ const SimulatorCanvas: React.FC<Props> = ({
       ctx.beginPath(); ctx.arc(0, 0, Math.max(0.1, sz/4), 0, Math.PI * 2); ctx.fillStyle = '#333'; ctx.fill();
       ctx.fillStyle = isSelected ? '#00f2ff' : '#aaa';
       ctx.beginPath(); ctx.moveTo(sz/2 - 5*vs.zoom, 0); ctx.lineTo(sz/2 - 15*vs.zoom, -10*vs.zoom); ctx.lineTo(sz/2 - 15*vs.zoom, 10*vs.zoom); ctx.fill();
-      
-      // 恢復狀態 LED 燈
       const ledColor = a.is_running ? '#00ff00' : (a.is_planning ? '#ffc107' : '#ff3333');
       ctx.beginPath(); ctx.arc(-sz/2 + 15*vs.zoom, -sz/2 + 15*vs.zoom, Math.max(0.1, 4*vs.zoom), 0, Math.PI * 2);
       ctx.fillStyle = ledColor; ctx.shadowBlur = 8; ctx.shadowColor = ledColor; ctx.fill();
-      ctx.shadowBlur = 0; ctx.restore();
-
-      // --- 繪製 AGV 上的貨物 ---
+      ctx.shadowBlur = 0;
       if (a.has_goods) {
-          ctx.save(); ctx.translate(cx, cy); ctx.rotate(-ds.theta);
           ctx.fillStyle = '#ff9800'; ctx.strokeStyle = '#e65100'; ctx.lineWidth = 1 * vs.zoom;
-          const cargoSize = sz * 0.4;
-          ctx.fillRect(-cargoSize/2, -cargoSize/2, cargoSize, cargoSize);
+          const cargoSize = sz * 0.4; ctx.fillRect(-cargoSize/2, -cargoSize/2, cargoSize, cargoSize);
           ctx.strokeRect(-cargoSize/2, -cargoSize/2, cargoSize, cargoSize);
-          // 畫一個簡單的 X 膠帶效果
-          ctx.beginPath(); ctx.moveTo(-cargoSize/2, -cargoSize/2); ctx.lineTo(cargoSize/2, cargoSize/2);
-          ctx.moveTo(cargoSize/2, -cargoSize/2); ctx.lineTo(-cargoSize/2, cargoSize/2);
-          ctx.stroke(); ctx.restore();
       }
-      
+      ctx.restore();
       ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(8, 11 * vs.zoom)}px monospace`;
       ctx.fillText(a.id, cx - 20, cy - sz * 0.7);
     });
 
-    // --- 6. 設備 (專用工業圖標) 在最上層 ---
     currentTelemetry.obstacles.filter(ob => ob.type === 'equipment').forEach(ob => {
       const { cx, cy } = worldToCanvas(ob.x, ob.y, w, h, vs);
-      const isSelected = currentSelectedObId === ob.id;
+      const isSelected = selectedObstacleIdRef.current === ob.id;
       const isAutoSource = autoTaskSourceId === ob.id;
-      
       const size = (ob.radius || 1000) * scale;
       const colors: Record<string, string> = { 'normal': '#ffd700', 'running': '#39ff14', 'error': '#ff4d4d' };
       const baseColor = colors[ob.status || 'running'] || '#39ff14';
-      
       ctx.save(); ctx.translate(cx, cy);
       const iconScale = size / 50; ctx.scale(iconScale, iconScale);
-      
-      // 如果是 AUTO 模式選中的起點，增加青色發光
-      if (isAutoSource) {
-          ctx.shadowBlur = 20; ctx.shadowColor = '#00f2ff';
-          ctx.strokeStyle = '#00f2ff';
-          ctx.lineWidth = 3 / iconScale;
-      } else {
-          ctx.strokeStyle = '#fff';
-          ctx.lineWidth = (1.5 * vs.zoom) / iconScale;
-      }
-
-      ctx.globalAlpha = 0.7; ctx.fillStyle = isSelected ? '#ff6600' : baseColor; ctx.fill(stationPath2D);
-      ctx.globalAlpha = 1.0; 
-      if (isSelected) { ctx.shadowBlur = 15; ctx.shadowColor = '#ff6600'; }
-      ctx.stroke(stationPath2D);
-      ctx.beginPath(); ctx.arc(0, 0, 5 / iconScale, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
-      
-      // --- 繪製設備上的貨物 ---
+      ctx.globalAlpha = 0.7; ctx.fillStyle = (isSelected || isAutoSource) ? '#ff6600' : baseColor;
+      ctx.fill(stationPath2D); ctx.globalAlpha = 1.0; ctx.strokeStyle = '#fff'; ctx.lineWidth = (1.5 * vs.zoom) / iconScale;
+      ctx.stroke(stationPath2D); ctx.beginPath(); ctx.arc(0, 0, 5 / iconScale, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
       if (ob.has_goods) {
           ctx.fillStyle = '#ff9800'; ctx.strokeStyle = '#e65100'; ctx.lineWidth = 1 / iconScale;
-          const cargoSize = 40; // 相對於 iconScale 50
-          ctx.fillRect(-cargoSize/2, -cargoSize/2, cargoSize, cargoSize);
-          ctx.strokeRect(-cargoSize/2, -cargoSize/2, cargoSize, cargoSize);
-          ctx.beginPath(); ctx.moveTo(-cargoSize/2, -cargoSize/2); ctx.lineTo(cargoSize/2, cargoSize/2);
-          ctx.moveTo(cargoSize/2, -cargoSize/2); ctx.lineTo(-cargoSize/2, cargoSize/2);
-          ctx.stroke();
+          const cargoSize = 40; ctx.fillRect(-cargoSize/2, -cargoSize/2, cargoSize, cargoSize); ctx.strokeRect(-cargoSize/2, -cargoSize/2, cargoSize, cargoSize);
       }
-      
       ctx.restore();
-      
       if (ob.docking_angle !== undefined) {
-          ctx.save(); ctx.translate(cx, cy);
-          const angleRad = (ob.docking_angle * Math.PI) / 180;
-          ctx.rotate(-angleRad + Math.PI); ctx.strokeStyle = '#00f2ff'; ctx.lineWidth = 2 * vs.zoom;
-          ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(size * 0.8, 0);
-          ctx.lineTo(size * 0.6, -size * 0.1); ctx.moveTo(size * 0.8, 0); ctx.lineTo(size * 0.6, size * 0.1); ctx.stroke();
-          ctx.restore();
+          ctx.save(); ctx.translate(cx, cy); const angleRad = (ob.docking_angle * Math.PI) / 180; ctx.rotate(-angleRad + Math.PI);
+          ctx.strokeStyle = '#00f2ff'; ctx.lineWidth = 2 * vs.zoom; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(size * 0.8, 0);
+          ctx.lineTo(size * 0.6, -size * 0.1); ctx.moveTo(size * 0.8, 0); ctx.lineTo(size * 0.6, size * 0.1); ctx.stroke(); ctx.restore();
       }
-      ctx.save(); ctx.translate(cx, cy);
-      ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(10, 12 * vs.zoom)}px monospace`;
-      ctx.textAlign = 'center'; ctx.fillText(ob.id, 0, -size - 10 * vs.zoom);
-      ctx.restore();
+      ctx.save(); ctx.translate(cx, cy); ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(10, 12 * vs.zoom)}px monospace`; ctx.textAlign = 'center'; ctx.fillText(ob.id, 0, -size - 10 * vs.zoom); ctx.restore();
     });
 
     animationFrameId.current = requestAnimationFrame(render);
-  }, [worldToCanvas, dimensions, viewState, showSearch]);
+  }, [worldToCanvas, dimensions, viewState, showSearch, autoTaskSourceId]);
 
   useEffect(() => {
     animationFrameId.current = requestAnimationFrame(render);
     return () => { if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current); };
   }, [render]);
-
-  const handleInteraction = (e: React.MouseEvent<HTMLCanvasElement>, callback: (x: number, y: number) => void) => {
-    const canvas = canvasRef.current; if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const { x, y } = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top, dimensions.width, dimensions.height, viewState);
-    callback(x, y);
-  };
 
   return (
     <div ref={containerRef} style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
@@ -409,24 +360,21 @@ const SimulatorCanvas: React.FC<Props> = ({
         onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
         onClick={(e) => {
             if (e.altKey) return;
-            const canvas = canvasRef.current; if (!canvas) return;
-            const rect = canvas.getBoundingClientRect();
+            const rect = canvasRef.current!.getBoundingClientRect();
             const { x, y } = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top, dimensions.width, dimensions.height, viewState);
             const currentTelemetry = telemetryRef.current;
             const clickedEq = currentTelemetry?.obstacles.find(ob => ob.type === 'equipment' && Math.sqrt((ob.x-x)**2+(ob.y-y)**2) < 1500);
             if (clickedEq) onCanvasClick(x, y);
             else {
                 const clickedAgv = currentTelemetry?.agvs.find(a => Math.sqrt((a.x-x)**2+(a.y-y)**2) < 1500);
-                if (clickedAgv) {
-                    onAgvSelect(clickedAgv.id);
-                    onCanvasClick(x, y); // 修正：同時觸發畫布點擊，支援 AUTO 模式下的指派
-                } else onCanvasClick(x, y);
+                if (clickedAgv) { onAgvSelect(clickedAgv.id); onCanvasClick(x, y); }
+                else onCanvasClick(x, y);
             }
         }} 
         onDoubleClick={(e) => handleInteraction(e, onCanvasDoubleClick)}
         onContextMenu={(e) => { e.preventDefault(); handleInteraction(e, onCanvasRightClick); }} 
       />
-      <button style={{ position: 'absolute', bottom: '20px', right: '20px', opacity: 0.6 }} onClick={() => setViewState({ zoom: 1, offsetX: 0, offsetY: 0 })}>
+      <button style={{ position: 'absolute', bottom: '20px', right: '20px', opacity: 0.6 }} onClick={() => { setViewState({ zoom: 1, offsetX: 0, offsetY: 0 }); staticNeedsUpdate.current = true; }}>
         RESET VIEW
       </button>
     </div>

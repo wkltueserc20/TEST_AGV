@@ -34,8 +34,8 @@ class AGVController:
             if ob['type'] == 'equipment':
                 # 設備半徑 1000 + AGV 半徑 500 = 1500mm 開始碰撞。
                 # 將放寬距離設為 2000mm，確保 AGV 在接觸邊緣前就能被放行進入對接。
-                dist_to_eq = math.sqrt((ob['x'] - x)**2 + (ob['y'] - y)**2)
-                if dist_to_eq < 2000:
+                # 效能優化：使用平方距離
+                if (ob['x'] - x)**2 + (ob['y'] - y)**2 < 4000000: # 2000**2
                     continue
 
             if ob['type'] == 'rectangle':
