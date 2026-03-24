@@ -6,6 +6,8 @@ import threading
 import time
 import numpy as np
 from typing import List, Dict, Any, Tuple, Optional
+from shapely.geometry import Point, box
+from shapely.affinity import rotate, translate
 
 from agv import AGV
 
@@ -16,6 +18,7 @@ class World:
         self.width = width
         self.height = height
         self.obstacles: List[Dict[str, Any]] = []
+        self.obstacle_geoms: Dict[str, Any] = {} # 幾何緩存
         self.agvs: Dict[str, AGV] = {}
         self.task_queue: List[Dict[str, Any]] = [] 
         self.task_history: List[Dict[str, Any]] = [] # 新增：已完成任務歷史
@@ -38,6 +41,21 @@ class World:
         self.load_agvs()
         self.update_static_costmap()
 
+    def update_obstacle_geoms(self):
+        """全面更新幾何緩存"""
+        new_geoms = {}
+        for ob in self.obstacles:
+            oid = str(ob.get("id"))
+            if ob['type'] == 'rectangle':
+                w, h = ob.get('width', 1000), ob.get('height', 1000)
+                geom = box(-w/2, -h/2, w/2, h/2)
+                geom = rotate(geom, ob.get('angle', 0), use_radians=True)
+                geom = translate(geom, ob['x'], ob['y'])
+            else:
+                geom = Point(ob['x'], ob['y']).buffer(ob.get('radius', 500))
+            new_geoms[oid] = geom
+        self.obstacle_geoms = new_geoms
+
     def save_obstacles(self):
         try:
             with open(self.storage_file, 'w', encoding='utf-8') as f:
@@ -54,6 +72,7 @@ class World:
                 for ob in self.obstacles:
                     if ob.get("type") == "equipment" and "has_goods" not in ob:
                         ob["has_goods"] = False
+                self.update_obstacle_geoms()
             except Exception as e:
                 logger.error(f"Failed to load obstacles: {e}")
                 self.obstacles = []
@@ -174,6 +193,7 @@ class World:
         if ob.get("type") == "equipment" and "has_goods" not in ob:
             ob["has_goods"] = False
         self.obstacles.append(ob); self.save_obstacles()
+        self.update_obstacle_geoms()
         self.update_static_costmap()
 
     def update_obstacle(self, ob_data: Dict[str, Any]):
@@ -186,16 +206,19 @@ class World:
                     if k not in ["id", "old_id", "new_id"]: ob[k] = v
                 break
         self.save_obstacles()
+        self.update_obstacle_geoms()
         self.update_static_costmap()
 
     def remove_obstacle(self, ob_id: str):
         if not ob_id: return
         self.obstacles = [o for o in self.obstacles if str(o.get("id")) != str(ob_id)]
         self.save_obstacles()
+        self.update_obstacle_geoms()
         self.update_static_costmap()
 
     def clear_obstacles(self):
-        self.obstacles = []; self.save_obstacles(); self.update_static_costmap()
+        self.obstacles = []; self.save_obstacles(); 
+        self.update_obstacle_geoms(); self.update_static_costmap()
 
     def update_path_occupancy(self, agv_id: str, path_points: List[Tuple[float, float]]):
         self.path_occupancy[agv_id] = path_points

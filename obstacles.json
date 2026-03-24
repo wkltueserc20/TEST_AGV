@@ -1,0 +1,11 @@
+[
+  {
+    "id": "TEST_OB_1",
+    "type": "rectangle",
+    "x": 10000,
+    "y": 10000,
+    "width": 1000,
+    "height": 1000,
+    "angle": 0
+  }
+]

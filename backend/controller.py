@@ -14,46 +14,62 @@ class AGVController:
         self.max_accel = 1500.0
         self.max_dyaw_rate = 3.0
 
-    def is_pose_safe(self, x: float, y: float, theta: float, obstacles: List[Dict[str, Any]], margin=525, ignore_id: str = None) -> Tuple[bool, Optional[str]]:
+    def is_pose_safe(self, x: float, y: float, theta: float, obstacles: List[Dict[str, Any]], margin=525, ignore_id: str = None, obstacle_geoms: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
         """
-        檢查特定位姿是否安全。可選忽略特定 ID (用於解鎖近場死鎖)。
+        檢查特定位姿是否安全。優化：優先使用預計算的幾何緩存。
         """
-        poly = box(-500, -500, 500, 500)
-        poly = rotate(poly, theta, use_radians=True, origin=(0,0))
-        poly = translate(poly, x, y)
-        
-        wall_safe_poly = poly.buffer(525 - 500)
-        social_safe_poly = poly.buffer(margin - 500)
-        
+        # 優化：預先計算膨脹後的 AGV 邊界 (AGV 本身 1000x1000)
+        # 這裡直接使用膨脹後的尺寸，避免 buffer()
+        half_wall = 525 / 2.0  # 牆體/障礙物避讓半徑
+        half_social = margin / 2.0 # 車間避讓半徑
+
+        # 牆體碰撞用的多邊形
+        wall_poly = box(x - 500, y - 500, x + 500, y + 500)
+        wall_poly = rotate(wall_poly, theta, use_radians=True, origin=(x, y))
+        # 使用快速 buffer (或者更好的方式是直接定義更大的 box)
+        # 牆體避讓膨脹 25mm (525-500)
+        wall_check_poly = wall_poly.buffer(25) 
+
+        # 車間碰撞用的多邊形 (如果 margin > 525)
+        social_check_poly = None
+        if margin > 525:
+            social_check_poly = wall_poly.buffer(margin - 500)
+        else:
+            social_check_poly = wall_check_poly
+
         for ob in obstacles:
-            oid = ob.get("id", "unknown")
+            oid = str(ob.get("id", "unknown"))
             if ignore_id and oid == ignore_id:
                 continue
-            
-            # 智慧對接：如果是設備類型，檢查是否為當前目標或正在對接中
+
+            # 智慧對接放行邏輯 (保持不變)
             if ob['type'] == 'equipment':
-                # 設備半徑 1000 + AGV 半徑 500 = 1500mm 開始碰撞。
-                # 將放寬距離設為 2000mm，確保 AGV 在接觸邊緣前就能被放行進入對接。
-                # 效能優化：使用平方距離
                 if (ob['x'] - x)**2 + (ob['y'] - y)**2 < 4000000: # 2000**2
                     continue
 
-            if ob['type'] == 'rectangle':
-                w, h = ob.get('width', 1000), ob.get('height', 1000)
-                ob_geom = box(-w/2, -h/2, w/2, h/2)
-                ob_geom = rotate(ob_geom, ob.get('angle', 0), use_radians=True)
-                ob_geom = translate(ob_geom, ob['x'], ob['y'])
+            # --- 核心優化：優先使用緩存 ---
+            ob_geom = None
+            if obstacle_geoms and oid in obstacle_geoms:
+                ob_geom = obstacle_geoms[oid]
             else:
-                ob_geom = Point(ob['x'], ob['y']).buffer(ob.get('radius', 500))
-            
+                # 只有緩存中沒有的 (例如其他 AGV) 才動態生成
+                if ob['type'] == 'rectangle':
+                    w, h = ob.get('width', 1000), ob.get('height', 1000)
+                    ob_geom = box(-w/2, -h/2, w/2, h/2)
+                    ob_geom = rotate(ob_geom, ob.get('angle', 0), use_radians=True)
+                    ob_geom = translate(ob_geom, ob['x'], ob['y'])
+                else:
+                    ob_geom = Point(ob['x'], ob['y']).buffer(ob.get('radius', 500))
+
             is_agv = oid.startswith("AGV")
-            check_poly = social_safe_poly if is_agv else wall_safe_poly
-            
+            check_poly = social_check_poly if is_agv else wall_check_poly
+
             if check_poly.intersects(ob_geom):
                 return False, oid
         return True, None
 
-    def compute_command(self, x, y, theta, v_curr, omega_curr, target_wp, max_speed, obstacles, margin=525, dt=0.1, ignore_id: str = None, status: str = None, force_forward: bool = False) -> Tuple[float, float, Optional[str]]:
+
+    def compute_command(self, x, y, theta, v_curr, omega_curr, target_wp, max_speed, obstacles, margin=525, dt=0.1, ignore_id: str = None, status: str = None, force_forward: bool = False, obstacle_geoms: Dict[str, Any] = None) -> Tuple[float, float, Optional[str]]:
         """
         計算控制指令，支援前進與倒車。
         """
@@ -89,7 +105,7 @@ class AGVController:
         if abs(v_curr) < 50.0:
             if abs(alpha) > 0.4:
                 w = 1.2 if alpha > 0 else -1.2
-                safe, culprit = self.is_pose_safe(x, y, theta + w * 0.1, obstacles, margin=rotate_margin, ignore_id=ignore_id)
+                safe, culprit = self.is_pose_safe(x, y, theta + w * 0.1, obstacles, margin=rotate_margin, ignore_id=ignore_id, obstacle_geoms=obstacle_geoms)
                 if safe:
                     v, w = self.limit_physics(0.0, w, v_curr, omega_curr, max_speed, dt, status=status)
                     return v, w, None
@@ -97,7 +113,7 @@ class AGVController:
         else:
             if abs(alpha) > 0.4:
                 w = 1.2 if alpha > 0 else -1.2
-                safe, culprit = self.is_pose_safe(x, y, theta + w * 0.1, obstacles, margin=rotate_margin, ignore_id=ignore_id)
+                safe, culprit = self.is_pose_safe(x, y, theta + w * 0.1, obstacles, margin=rotate_margin, ignore_id=ignore_id, obstacle_geoms=obstacle_geoms)
                 if safe:
                     v, w = self.limit_physics(0.0, w, v_curr, omega_curr, max_speed, dt, status=status)
                     return v, w, None
@@ -124,7 +140,7 @@ class AGVController:
             tx += cmd_v * math.cos(tt) * 0.2
             ty += cmd_v * math.sin(tt) * 0.2
             tt += cmd_w * 0.2
-            safe, culprit = self.is_pose_safe(tx, ty, tt, obstacles, margin=margin, ignore_id=ignore_id)
+            safe, culprit = self.is_pose_safe(tx, ty, tt, obstacles, margin=margin, ignore_id=ignore_id, obstacle_geoms=obstacle_geoms)
             if not safe:
                 return 0.0, 0.0, culprit
             

@@ -246,12 +246,20 @@ const SimulatorCanvas: React.FC<Props> = ({
     });
 
     if (currentTelemetry.path_occupancy) {
-        ctx.save(); ctx.fillStyle = 'rgba(255, 77, 77, 0.08)';
+        ctx.save(); ctx.strokeStyle = 'rgba(255, 77, 77, 0.15)';
+        ctx.lineWidth = 1600 * scale; // 兩倍半徑，作為線寬
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round';
         Object.values(currentTelemetry.path_occupancy).forEach(points => {
-            for (let i = 0; i < points.length; i += 5) {
+            if (points.length < 2) return;
+            ctx.beginPath();
+            const first = worldToCanvas(points[0][0], points[0][1], w, h, vs);
+            ctx.moveTo(first.cx, first.cy);
+            // 抽樣繪製以進一步提升性能 (每 3 個點取 1 個)
+            for (let i = 1; i < points.length; i += 3) {
                 const cp = worldToCanvas(points[i][0], points[i][1], w, h, vs);
-                ctx.beginPath(); ctx.arc(cp.cx, cp.cy, 800 * scale, 0, Math.PI * 2); ctx.fill();
+                ctx.lineTo(cp.cx, cp.cy);
             }
+            ctx.stroke();
         });
         ctx.restore();
     }

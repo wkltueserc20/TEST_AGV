@@ -196,7 +196,7 @@ class AGV:
 
             if goto_ctrl:
                 ignore_id = self.culprit_id if self.status == AGVStatus.EVADING else None
-                bv, bo, culprit = self.controller.compute_command(self.x, self.y, self.theta, self.v, self.omega, target_wp, max_speed, all_obs, dt=0.05, force_forward=force_forward, ignore_id=ignore_id)
+                bv, bo, culprit = self.controller.compute_command(self.x, self.y, self.theta, self.v, self.omega, target_wp, max_speed, all_obs, dt=0.05, force_forward=force_forward, ignore_id=ignore_id, obstacle_geoms=world.obstacle_geoms)
                 self.target_v, self.target_omega = bv, bo; self.culprit_id = culprit
 
         # 5. 物理更新與安全檢查
@@ -206,7 +206,7 @@ class AGV:
         # 安全檢查
         all_obs = world.obstacles + world.get_dynamic_obstacles(exclude_agv_id=self.id)
         margin = 505 if self.status == AGVStatus.EVADING else 525
-        safe, _ = self.controller.is_pose_safe(new_x, new_y, new_theta, all_obs, margin=margin)
+        safe, _ = self.controller.is_pose_safe(new_x, new_y, new_theta, all_obs, margin=margin, obstacle_geoms=world.obstacle_geoms)
         if safe:
             self.x, self.y, self.theta = new_x, new_y, new_theta
         else:
@@ -254,5 +254,7 @@ class AGV:
         return False
 
     def trigger_evasion(self, world):
+        if self.is_planning:
+            return # 已經在規劃中，不要再開啟新執行緒
         all_obs = world.obstacles + world.get_dynamic_obstacles(exclude_agv_id=self.id)
         threading.Thread(target=self._async_replan, args=(all_obs, world.static_costmap, world, self.status, True), daemon=True).start()
