@@ -15,20 +15,53 @@ function App() {
   const [activeTool, setActiveTool] = useState<ToolMode>('SELECT');
   const [showSearch, setShowSearch] = useState(true);
 
-  const [editingId, setEditingId] = useState("");
+  // 本地緩衝狀態，解決輸入卡頓問題
+  const [localObFields, setLocalObFields] = useState({ id: "", x: 0, y: 0, angle: 0 });
+  const [isEditing, setIsEditing] = useState(false);
 
+  const selectedAgv = telemetry?.agvs.find(a => a.id === selectedAgvId);
+  const selectedObstacle = telemetry?.obstacles.find(o => o.id === selectedObId);
+
+  // 當選中對象改變時，初始化本地緩衝
   useEffect(() => {
-    if (selectedObstacle) setEditingId(selectedObstacle.id);
-  }, [selectedObId]);
+    if (selectedObstacle) {
+      setLocalObFields({
+        id: selectedObstacle.id,
+        x: Math.round(selectedObstacle.x),
+        y: Math.round(selectedObstacle.y),
+        angle: selectedObstacle.docking_angle || 0
+      });
+    } else {
+      setLocalObFields({ id: "", x: 0, y: 0, angle: 0 });
+    }
+  }, [selectedObId]); // 僅在切換選中對象時重置
+
+  // 當收到新的數據且不在編輯時，同步數值 (處理他人修改或後端自動變更)
+  useEffect(() => {
+    if (selectedObstacle && !isEditing) {
+      setLocalObFields(prev => {
+          // 只有當差距真的很大時才同步，避免微小抖動重置輸入框
+          if (prev.id !== selectedObstacle.id || 
+              Math.abs(prev.x - selectedObstacle.x) > 10 || 
+              Math.abs(prev.y - selectedObstacle.y) > 10 ||
+              prev.angle !== selectedObstacle.docking_angle) {
+              return {
+                id: selectedObstacle.id,
+                x: Math.round(selectedObstacle.x),
+                y: Math.round(selectedObstacle.y),
+                angle: selectedObstacle.docking_angle || 0
+              };
+          }
+          return prev;
+      });
+    }
+  }, [telemetry, isEditing]);
 
   useEffect(() => {
     if (telemetry?.agvs.length && !selectedAgvId) {
       setSelectedAgvId(telemetry.agvs[0].id);
     }
   }, [telemetry, selectedAgvId]);
-
-  const selectedAgv = telemetry?.agvs.find(a => a.id === selectedAgvId);
-  const selectedObstacle = telemetry?.obstacles.find(o => o.id === selectedObId);
 
   const snapToCenter = (val: number) => Math.floor(val / 1000) * 1000 + 500;
   const snapToIntersection = (val: number) => Math.round(val / 1000) * 1000;
@@ -93,18 +126,28 @@ function App() {
     }
   };
 
-  const updateObstacle = (id: string, field: string, value: any) => {
-    const ob = telemetry?.obstacles.find(o => o.id === id);
-    if (!ob) return;
-    
-    if (field === 'new_id') {
-        if (telemetry?.obstacles.some(o => o.id === value && o.id !== id)) {
-            alert("ID already exists!"); return;
+  const handleCommit = (field?: string, value?: any) => {
+    if (!selectedObstacle) return;
+    // 移除這裡的 setIsEditing(false)，改由 onBlur 統一處理
+
+    const dataToSync = { ...localObFields };
+    if (field && value !== undefined) (dataToSync as any)[field] = value;
+
+    if (dataToSync.id !== selectedObstacle.id) {
+        if (telemetry?.obstacles.some(o => o.id === dataToSync.id && o.id !== selectedObstacle.id)) {
+            alert("ID already exists!");
+            setLocalObFields(prev => ({ ...prev, id: selectedObstacle.id }));
+            return;
         }
-        sendCommand('update_obstacle', { data: { old_id: id, new_id: value } });
-        setSelectedObId(value);
+        sendCommand('update_obstacle', { data: { old_id: selectedObstacle.id, new_id: dataToSync.id } });
+        setSelectedObId(dataToSync.id);
     } else {
-        sendCommand('update_obstacle', { data: { ...ob, [field]: (field==='x'||field==='y') ? snapToCenter(value) : value } });
+        sendCommand('update_obstacle', { data: { 
+            ...selectedObstacle, 
+            x: snapToCenter(dataToSync.x), 
+            y: snapToCenter(dataToSync.y), 
+            docking_angle: dataToSync.angle 
+        } });
     }
   };
 
@@ -164,32 +207,51 @@ function App() {
             <div className="item-card active">
               <div className="telemetry-grid">
                 <div className="tele-item"><label>ID</label>
-                    <input type="text" value={editingId} 
-                        onChange={(e) => setEditingId(e.target.value)} 
-                        onBlur={() => editingId !== selectedObstacle.id && updateObstacle(selectedObstacle.id, 'new_id', editingId)}
-                        onKeyDown={(e) => e.key === 'Enter' && updateObstacle(selectedObstacle.id, 'new_id', editingId)}
+                    <input type="text" 
+                        value={localObFields.id} 
+                        onFocus={() => setIsEditing(true)}
+                        onChange={(e) => setLocalObFields(prev => ({ ...prev, id: e.target.value }))} 
+                        onBlur={() => { handleCommit(); setIsEditing(false); }}
+                        onKeyDown={(e) => e.key === 'Enter' && handleCommit()}
                     />
                 </div>
                 {selectedObstacle.type === 'equipment' && (
                     <>
                     <div className="tele-item"><label>STATUS</label>
-                        <select value={selectedObstacle.status || 'running'} onChange={(e) => updateObstacle(selectedObstacle.id, 'status', e.target.value)}>
+                        <select value={selectedObstacle.status || 'running'} onChange={(e) => sendCommand('update_obstacle', { data: { ...selectedObstacle, status: e.target.value } })}>
                             <option value="normal">NORMAL</option>
                             <option value="running">RUNNING</option>
                             <option value="error">ERROR</option>
                         </select>
                     </div>
                     <div className="tele-item"><label>ANGLE</label>
-                        <input type="number" min="0" max="359" value={selectedObstacle.docking_angle || 0} 
-                            onChange={(e) => updateObstacle(selectedObstacle.id, 'docking_angle', parseInt(e.target.value)||0)} />
+                        <input type="number" min="0" max="359" 
+                            value={localObFields.angle} 
+                            onFocus={() => setIsEditing(true)}
+                            onChange={(e) => setLocalObFields(prev => ({ ...prev, angle: parseInt(e.target.value)||0 }))}
+                            onBlur={() => { handleCommit(); setIsEditing(false); }}
+                            onKeyDown={(e) => e.key === 'Enter' && handleCommit()}
+                        />
                     </div>
                     </>
                 )}
                 <div className="tele-item"><label>X</label>
-                  <input type="number" step="1000" value={Math.round(selectedObstacle.x)} onChange={(e) => updateObstacle(selectedObstacle.id, 'x', parseInt(e.target.value)||0)} />
+                  <input type="number" step="1000" 
+                    value={localObFields.x} 
+                    onFocus={() => setIsEditing(true)}
+                    onChange={(e) => setLocalObFields(prev => ({ ...prev, x: parseInt(e.target.value)||0 }))}
+                    onBlur={() => { handleCommit(); setIsEditing(false); }}
+                    onKeyDown={(e) => e.key === 'Enter' && handleCommit()}
+                  />
                 </div>
                 <div className="tele-item"><label>Y</label>
-                  <input type="number" step="1000" value={Math.round(selectedObstacle.y)} onChange={(e) => updateObstacle(selectedObstacle.id, 'y', parseInt(e.target.value)||0)} />
+                  <input type="number" step="1000" 
+                    value={localObFields.y} 
+                    onFocus={() => setIsEditing(true)}
+                    onChange={(e) => setLocalObFields(prev => ({ ...prev, y: parseInt(e.target.value)||0 }))}
+                    onBlur={() => { handleCommit(); setIsEditing(false); }}
+                    onKeyDown={(e) => e.key === 'Enter' && handleCommit()}
+                  />
                 </div>
               </div>
               <button className="danger" style={{ width: '100%', marginTop: '10px' }} 
