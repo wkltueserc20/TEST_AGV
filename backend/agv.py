@@ -128,7 +128,7 @@ class AGV:
             thread = threading.Thread(target=self._async_replan, args=(all_obs, world.static_costmap, world, self.status), daemon=True)
             thread.start()
 
-        if self.global_path:
+        if self.global_path and self.is_running:
             min_dist = float("inf"); closest_idx = 0
             for i, wp in enumerate(self.global_path):
                 d = (wp[0]-self.x)**2 + (wp[1]-self.y)**2
