@@ -5,6 +5,7 @@ interface Props {
   telemetry: Telemetry | null;
   selectedAgvId: string | null;
   selectedObstacleId: string | null;
+  autoTaskSourceId: string | null; // 新增：AUTO 模式選中的起點
   showSearch: boolean;
   onCanvasClick: (x: number, y: number) => void;
   onCanvasDoubleClick: (x: number, y: number) => void;
@@ -20,7 +21,7 @@ const STATION_PATH = "M -50,-50 L 50,-50 L 50,-20 L 40,-20 L 40,20 L 50,20 L 50,
 const stationPath2D = new Path2D(STATION_PATH);
 
 const SimulatorCanvas: React.FC<Props> = ({ 
-  telemetry, selectedAgvId, selectedObstacleId, showSearch,
+  telemetry, selectedAgvId, selectedObstacleId, autoTaskSourceId, showSearch,
   onCanvasClick, onCanvasDoubleClick, onCanvasRightClick, onAgvSelect 
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -224,7 +225,8 @@ const SimulatorCanvas: React.FC<Props> = ({
             if (fromAgv && toAgv) {
                 const p1 = worldToCanvas(fromAgv.x, fromAgv.y, w, h, vs);
                 const p2 = worldToCanvas(toAgv.x, toAgv.y, w, h, vs);
-                ctx.save(); ctx.setLineDash([5, 5]);
+                ctx.save();
+                ctx.setLineDash([5, 5]);
                 const color = link.type === 'WAITING' ? 'rgba(255, 152, 0, 0.6)' : 'rgba(187, 134, 252, 0.6)';
                 ctx.strokeStyle = color; ctx.lineWidth = 2 * vs.zoom;
                 ctx.beginPath(); ctx.moveTo(p1.cx, p1.cy); ctx.lineTo(p2.cx, p2.cy); ctx.stroke();
@@ -236,6 +238,33 @@ const SimulatorCanvas: React.FC<Props> = ({
             }
         });
     }
+
+    // --- 3.7 繪製任務隊列連線 (Mission Links) ---
+    if (currentTelemetry.task_queue) {
+        currentTelemetry.task_queue.forEach((task: any) => {
+            const source = currentTelemetry.obstacles.find(ob => ob.id === task.source_id);
+            const target = currentTelemetry.obstacles.find(ob => ob.id === task.target_id);
+            if (source && target) {
+                const p1 = worldToCanvas(source.x, source.y, w, h, vs);
+                const p2 = worldToCanvas(target.x, target.y, w, h, vs);
+                ctx.save();
+                ctx.setLineDash([8, 4]);
+                ctx.strokeStyle = task.status === 'ASSIGNED' ? 'rgba(57, 255, 20, 0.4)' : 'rgba(88, 166, 255, 0.4)';
+                ctx.lineWidth = 2 * vs.zoom;
+                ctx.beginPath(); ctx.moveTo(p1.cx, p1.cy); ctx.lineTo(p2.cx, p2.cy); ctx.stroke();
+
+                // 標籤
+                const midX = (p1.cx + p2.cx) / 2;
+                const midY = (p1.cy + p2.cy) / 2;
+                ctx.fillStyle = task.status === 'ASSIGNED' ? '#39ff14' : '#58a6ff';
+                ctx.font = `bold ${Math.max(10, 11 * vs.zoom)}px monospace`;
+                ctx.textAlign = 'center';
+                ctx.fillText(task.status, midX, midY - 5 * vs.zoom);
+                ctx.restore();
+            }
+        });
+    }
+
 
     // --- 4. 靜態障礙物 (牆壁與圓形) ---
     currentTelemetry.obstacles.filter(ob => ob.type !== 'equipment').forEach(ob => {
@@ -284,6 +313,19 @@ const SimulatorCanvas: React.FC<Props> = ({
       ctx.beginPath(); ctx.arc(-sz/2 + 15*vs.zoom, -sz/2 + 15*vs.zoom, Math.max(0.1, 4*vs.zoom), 0, Math.PI * 2);
       ctx.fillStyle = ledColor; ctx.shadowBlur = 8; ctx.shadowColor = ledColor; ctx.fill();
       ctx.shadowBlur = 0; ctx.restore();
+
+      // --- 繪製 AGV 上的貨物 ---
+      if (a.has_goods) {
+          ctx.save(); ctx.translate(cx, cy); ctx.rotate(-ds.theta);
+          ctx.fillStyle = '#ff9800'; ctx.strokeStyle = '#e65100'; ctx.lineWidth = 1 * vs.zoom;
+          const cargoSize = sz * 0.4;
+          ctx.fillRect(-cargoSize/2, -cargoSize/2, cargoSize, cargoSize);
+          ctx.strokeRect(-cargoSize/2, -cargoSize/2, cargoSize, cargoSize);
+          // 畫一個簡單的 X 膠帶效果
+          ctx.beginPath(); ctx.moveTo(-cargoSize/2, -cargoSize/2); ctx.lineTo(cargoSize/2, cargoSize/2);
+          ctx.moveTo(cargoSize/2, -cargoSize/2); ctx.lineTo(-cargoSize/2, cargoSize/2);
+          ctx.stroke(); ctx.restore();
+      }
       
       ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(8, 11 * vs.zoom)}px monospace`;
       ctx.fillText(a.id, cx - 20, cy - sz * 0.7);
@@ -293,17 +335,42 @@ const SimulatorCanvas: React.FC<Props> = ({
     currentTelemetry.obstacles.filter(ob => ob.type === 'equipment').forEach(ob => {
       const { cx, cy } = worldToCanvas(ob.x, ob.y, w, h, vs);
       const isSelected = currentSelectedObId === ob.id;
+      const isAutoSource = autoTaskSourceId === ob.id;
+      
       const size = (ob.radius || 1000) * scale;
       const colors: Record<string, string> = { 'normal': '#ffd700', 'running': '#39ff14', 'error': '#ff4d4d' };
       const baseColor = colors[ob.status || 'running'] || '#39ff14';
       
       ctx.save(); ctx.translate(cx, cy);
       const iconScale = size / 50; ctx.scale(iconScale, iconScale);
+      
+      // 如果是 AUTO 模式選中的起點，增加青色發光
+      if (isAutoSource) {
+          ctx.shadowBlur = 20; ctx.shadowColor = '#00f2ff';
+          ctx.strokeStyle = '#00f2ff';
+          ctx.lineWidth = 3 / iconScale;
+      } else {
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = (1.5 * vs.zoom) / iconScale;
+      }
+
       ctx.globalAlpha = 0.7; ctx.fillStyle = isSelected ? '#ff6600' : baseColor; ctx.fill(stationPath2D);
-      ctx.globalAlpha = 1.0; ctx.strokeStyle = '#fff'; ctx.lineWidth = (1.5 * vs.zoom) / iconScale;
+      ctx.globalAlpha = 1.0; 
       if (isSelected) { ctx.shadowBlur = 15; ctx.shadowColor = '#ff6600'; }
       ctx.stroke(stationPath2D);
       ctx.beginPath(); ctx.arc(0, 0, 5 / iconScale, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
+      
+      // --- 繪製設備上的貨物 ---
+      if (ob.has_goods) {
+          ctx.fillStyle = '#ff9800'; ctx.strokeStyle = '#e65100'; ctx.lineWidth = 1 / iconScale;
+          const cargoSize = 40; // 相對於 iconScale 50
+          ctx.fillRect(-cargoSize/2, -cargoSize/2, cargoSize, cargoSize);
+          ctx.strokeRect(-cargoSize/2, -cargoSize/2, cargoSize, cargoSize);
+          ctx.beginPath(); ctx.moveTo(-cargoSize/2, -cargoSize/2); ctx.lineTo(cargoSize/2, cargoSize/2);
+          ctx.moveTo(cargoSize/2, -cargoSize/2); ctx.lineTo(-cargoSize/2, cargoSize/2);
+          ctx.stroke();
+      }
+      
       ctx.restore();
       
       if (ob.docking_angle !== undefined) {

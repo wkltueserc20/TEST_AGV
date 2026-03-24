@@ -95,6 +95,40 @@ body {
   border: 1px solid var(--border-main);
 }
 
+/* --- 全寬度提示狀態列 --- */
+.mode-status-bar {
+  background: #1a2333;
+  color: #58a6ff;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 20px;
+  border-bottom: 1px solid #30363d;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0.5px;
+}
+
+.mode-status-bar span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  color: #39ff14; /* AUTO 模式下使用綠色文字強調 */
+}
+
 .toolbar-container button {
   background: var(--bg-card);
   border: 1px solid var(--border-main);

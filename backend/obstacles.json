@@ -1946,7 +1946,8 @@
     "x": 43500,
     "y": 42500,
     "radius": 1000,
-    "status": "running"
+    "status": "running",
+    "has_goods": false
   },
   {
     "id": "EQP-MM90",
@@ -1955,7 +1956,8 @@
     "y": 32500,
     "radius": 1000,
     "status": "running",
-    "docking_angle": 180
+    "docking_angle": 180,
+    "has_goods": true
   },
   {
     "id": "EQP-Z20Z",
@@ -1964,7 +1966,8 @@
     "y": 28500,
     "radius": 1000,
     "status": "running",
-    "docking_angle": 180
+    "docking_angle": 180,
+    "has_goods": false
   },
   {
     "id": "EQP-2DTH",
@@ -1972,7 +1975,8 @@
     "x": 2500,
     "y": 250500,
     "radius": 1000,
-    "status": "running"
+    "status": "running",
+    "has_goods": false
   },
   {
     "id": "EQP-JTY0",
@@ -1981,7 +1985,8 @@
     "y": 20500,
     "radius": 1000,
     "status": "running",
-    "docking_angle": 180
+    "docking_angle": 180,
+    "has_goods": true
   },
   {
     "id": "EQP-TF47",
@@ -1990,7 +1995,8 @@
     "y": 24500,
     "radius": 1000,
     "status": "running",
-    "docking_angle": 180
+    "docking_angle": 180,
+    "has_goods": false
   },
   {
     "id": "EQP-L952",
@@ -1999,6 +2005,7 @@
     "y": 43500,
     "radius": 1000,
     "status": "running",
-    "docking_angle": 90
+    "docking_angle": 90,
+    "has_goods": false
   }
 ]

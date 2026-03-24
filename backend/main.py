@@ -5,6 +5,7 @@ import time
 import threading
 import queue
 import uuid
+import math
 from typing import List, Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,7 +24,7 @@ world = World()
 world_lock = threading.Lock()
 cmd_queue = queue.Queue()
 
-# 注意：World 初始化時會呼叫 load_agvs()，所以這裡不需要 init_id 的手動創建，除非是全新環境
+# 初始化一輛 AGV (僅在全新環境下)
 with world_lock:
     if not world.agvs:
         init_id = f"AGV-{str(uuid.uuid4())[:4].upper()}"
@@ -31,20 +32,17 @@ with world_lock:
         world.save_agvs()
 
 def get_snapshot():
+    """獲取當前世界的完整快照"""
     with world_lock:
-        agvs_data = []
-        for a in world.agvs.values():
-            d = a.to_dict()
-            if d.get("path"):
-                d["path"] = d["path"][::3]
-            agvs_data.append(d)
-        
         return {
-            "agvs": agvs_data,
+            "agvs": [a.to_dict() for a in world.agvs.values()],
             "obstacles": list(world.obstacles),
             "multiplier": SIM_MULTIPLIER,
             "path_occupancy": {k: v[::5] for k, v in world.path_occupancy.items()},
-            "reserved_havens": {k: v for k, v in world.reserved_havens.items()}
+            "reserved_havens": {k: v for k, v in world.reserved_havens.items()},
+            "task_queue": world.get_task_queue(),
+            "task_history": world.task_history,
+            "social_links": world.social_links
         }
 
 class ConnectionManager:
@@ -55,7 +53,7 @@ class ConnectionManager:
     def disconnect(self, ws: WebSocket):
         if ws in self.active_connections: self.active_connections.remove(ws)
     async def broadcast(self, data: dict):
-        msg = json.dumps(data)
+        msg = json.dumps({"type": "telemetry", "data": data})
         for conn in self.active_connections[:]:
             try: await conn.send_text(msg)
             except: 
@@ -90,62 +88,126 @@ def process_commands():
                     world.save_agvs()
                 elif t == "add_obstacle":
                     world.add_obstacle(msg.get("data"))
-                    for a in world.agvs.values(): a.replan_needed = True
                 elif t == "update_obstacle":
                     world.update_obstacle(msg.get("data"))
-                    for a in world.agvs.values(): a.replan_needed = True
                 elif t == "clear_obstacles":
                     world.clear_obstacles()
-                    for a in world.agvs.values(): a.replan_needed = True
                 elif t == "remove_obstacle":
                     ob_id = msg.get("id") or (msg.get("data") if not isinstance(msg.get("data"), dict) else msg.get("data").get("id"))
-                    if ob_id:
-                        world.remove_obstacle(str(ob_id))
-                        for a in world.agvs.values(): a.replan_needed = True
+                    if ob_id: world.remove_obstacle(str(ob_id))
+                elif t == "dispatch_task":
+                    # 修正：直接從 msg 讀取，並包含可選的 agv_id
+                    world.add_task(msg.get("source_id"), msg.get("target_id"), msg.get("agv_id"))
+                elif t == "clear_tasks":
+
+                    world.task_queue = []
+                    world.task_history = []
+                elif t == "remove_task":
+                    task_id = msg.get("task_id")
+                    affected_agv_id = world.remove_task(task_id)
+                    if affected_agv_id and affected_agv_id in world.agvs:
+                        a = world.agvs[affected_agv_id]
+                        # 如果車輛處於暫停 (is_running=False)，則清空任務
+                        if not a.is_running:
+                            a.current_task = None; a.status = "IDLE"; a.global_path = []
                 elif target_id and target_id in world.agvs:
                     a = world.agvs[target_id]
-                    if t == "start": 
-                        a.is_running = True; a.replan_needed = True; world.save_agvs()
-                    elif t == "pause": 
-                        a.is_running = False; world.save_agvs()
-                    elif t == "remove_agv": 
-                        del world.agvs[target_id]
-                        world.save_agvs()
+                    if t == "start": a.is_running = True; a.replan_needed = True
+                    elif t == "pause": a.is_running = False
+                    elif t == "remove_agv": del world.agvs[target_id]; world.save_agvs()
                     elif t == "reset":
                         a.x, a.y, a.theta = 5000.0, 5000.0, 0.0
-                        a.v, a.omega, a.l_rpm, a.r_rpm = 0.0, 0.0, 0.0, 0.0
-                        a.is_running = False; a.global_path = []
-                        world.save_agvs()
-                    elif t == "set_target":
-                        a.target = msg.get("data"); a.replan_needed = True; world.save_agvs()
-                    elif t == "set_speed":
-                        a.max_rpm = float(msg.get("data", 3000)); world.save_agvs()
+                        a.v, a.omega = 0.0, 0.0; a.is_running = False; a.global_path = []
+                    elif t == "set_target": a.target = msg.get("data"); a.replan_needed = True
+                    elif t == "set_speed": a.max_rpm = float(msg.get("data", 3000))
+                
+                # 任何變動後觸發重新規劃
+                if t in ["add_obstacle", "update_obstacle", "clear_obstacles", "remove_obstacle"]:
+                    for a in world.agvs.values(): a.replan_needed = True
         except Exception as e:
-            logger.error(f"Error processing command {t}: {e}")
+            logger.error(f"Command Error ({t}): {e}")
 
 def physics_engine_thread():
     real_dt = 0.0166 
+    last_dispatch_time = time.time()
     while True:
         cycle_start = time.time()
         process_commands()
+        
+        # --- 智慧調度員 (Dispatcher) ---
+        if cycle_start - last_dispatch_time > 1.0:
+            last_dispatch_time = cycle_start
+            try:
+                with world_lock:
+                    pending_tasks = [t for t in world.task_queue if t["status"] == "WAITING"]
+                    idle_agvs = [a for a in world.agvs.values() if a.status == "IDLE" and not a.is_running]
+                    
+                    for task in pending_tasks:
+                        if not idle_agvs: break
+                        
+                        # 調度篩選邏輯
+                        is_dropoff_only = (not task.get("source_id"))
+                        
+                        # 如果任務已經預指定了 AGV (來自前端點擊 AGV 的操作)
+                        pre_assigned_id = task.get("agv_id")
+                        best_agv = None
+                        
+                        if pre_assigned_id:
+                            # 檢查該指定車輛是否在空閒清單中
+                            best_agv = next((a for a in idle_agvs if a.id == pre_assigned_id), None)
+                            # 檢查貨物條件
+                            if best_agv:
+                                eligible = best_agv.has_goods if is_dropoff_only else not best_agv.has_goods
+                                if not eligible: best_agv = None # 不符合條件，放棄該任務指派
+                        
+                        if not best_agv:
+                            # 無預指定或預指定不可用，進行一般調度
+                            potential_agvs = []
+                            if is_dropoff_only:
+                                potential_agvs = [a for a in idle_agvs if a.has_goods]
+                            else:
+                                potential_agvs = [a for a in idle_agvs if not a.has_goods]
+                            
+                            if not potential_agvs: continue
+
+                            ref_id = task["source_id"] if task.get("source_id") else task["target_id"]
+                            ref_ob = next((o for o in world.obstacles if o["id"] == ref_id), None)
+                            if not ref_ob: task["status"] = "ERROR"; continue
+                            
+                            best_agv = min(potential_agvs, key=lambda a: math.sqrt((a.x - ref_ob["x"])**2 + (a.y - ref_ob["y"])**2))
+                        
+                        # 最終分配
+                        if best_agv:
+                            task["status"] = "ASSIGNED"
+                            task["agv_id"] = best_agv.id
+                            best_agv.current_task = {"source_id": task.get("source_id"), "target_id": task.get("target_id")}
+                            
+                            ref_id = task["source_id"] if task.get("source_id") else task["target_id"]
+                            ref_ob = next((o for o in world.obstacles if o["id"] == ref_id), None)
+                            best_agv.target = {"x": ref_ob["x"], "y": ref_ob["y"]}
+                            best_agv.is_running = True; best_agv.replan_needed = True
+                            world.save_agvs()
+                            idle_agvs.remove(best_agv)
+            except Exception as e:
+                logger.error(f"Dispatcher Error: {e}")
+
         sim_dt = real_dt * SIM_MULTIPLIER
         with world_lock:
             for a in world.agvs.values():
                 a.update(sim_dt, world)
+        
         elapsed = time.time() - cycle_start
-        if real_dt > elapsed:
-            time.sleep(real_dt - elapsed)
+        if real_dt > elapsed: time.sleep(real_dt - elapsed)
 
 async def telemetry_broadcaster():
     last_save_time = time.time()
     while True:
         start_time = asyncio.get_event_loop().time()
-        snapshot = get_snapshot()
-        await manager.broadcast({"type": "telemetry", "data": snapshot})
+        data = get_snapshot()
+        await manager.broadcast(data)
         
-        # 每 5 秒自動儲存一次 AGV 位置 (記憶功能)
         if time.time() - last_save_time > 5.0:
-            world.save_agvs()
+            with world_lock: world.save_agvs()
             last_save_time = time.time()
 
         elapsed = asyncio.get_event_loop().time() - start_time

@@ -27,6 +27,7 @@ export interface Telemetry {
   social_links?: SocialLink[];
   path_occupancy?: Record<string, [number, number][]>;
   reserved_havens?: Record<string, [number, number]>;
+  task_queue?: any[]; // 新增：支援物流任務隊列
 }
 
 export const useSimulation = (url: string) => {

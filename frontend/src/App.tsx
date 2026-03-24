@@ -4,8 +4,8 @@ import type { Telemetry, AGVData } from './useSimulation';
 import SimulatorCanvas from './SimulatorCanvas';
 import './App.css';
 
-// 移除 NAV 模式，目標設定改為全域右鍵功能
-type ToolMode = 'SELECT' | 'BUILD_SQ' | 'BUILD_CIR' | 'BUILD_STAR';
+// 模式定義：SELECT(調測), BUILD_SQ(方塊), BUILD_CIR(圓形), BUILD_STAR(設備), AUTO(物流任務)
+type ToolMode = 'SELECT' | 'BUILD_SQ' | 'BUILD_CIR' | 'BUILD_STAR' | 'AUTO';
 
 function App() {
   const { telemetry, isConnected, sendCommand } = useSimulation('ws://localhost:8000/ws');
@@ -18,6 +18,24 @@ function App() {
   // 本地緩衝狀態，解決輸入卡頓問題
   const [localObFields, setLocalObFields] = useState({ id: "", x: 0, y: 0, angle: 0 });
   const [isEditing, setIsEditing] = useState(false);
+
+  // AUTO 模式專用：存儲任務起點設備 ID
+  const [autoTaskSource, setAutoTaskSource] = useState<string | null>(null);
+  const [lastMissionStatus, setLastMissionStatus] = useState<string | null>(null);
+
+  // 切換模式時重置 AUTO 狀態
+  useEffect(() => {
+    setAutoTaskSource(null);
+    setLastMissionStatus(null);
+  }, [activeTool]);
+
+  // 定時清除成功訊息
+  useEffect(() => {
+    if (lastMissionStatus) {
+        const timer = setTimeout(() => setLastMissionStatus(null), 3000);
+        return () => clearTimeout(timer);
+    }
+  }, [lastMissionStatus]);
 
   const selectedAgv = telemetry?.agvs.find(a => a.id === selectedAgvId);
   const selectedObstacle = telemetry?.obstacles.find(o => o.id === selectedObId);
@@ -34,13 +52,12 @@ function App() {
     } else {
       setLocalObFields({ id: "", x: 0, y: 0, angle: 0 });
     }
-  }, [selectedObId]); // 僅在切換選中對象時重置
+  }, [selectedObId]);
 
-  // 當收到新的數據且不在編輯時，同步數值 (處理他人修改或後端自動變更)
+  // 當收到新的數據且不在編輯時，同步數值
   useEffect(() => {
     if (selectedObstacle && !isEditing) {
       setLocalObFields(prev => {
-          // 只有當差距真的很大時才同步，避免微小抖動重置輸入框
           if (prev.id !== selectedObstacle.id || 
               Math.abs(prev.x - selectedObstacle.x) > 10 || 
               Math.abs(prev.y - selectedObstacle.y) > 10 ||
@@ -93,12 +110,74 @@ function App() {
       } else {
         setSelectedObId(null);
       }
+    } else if (activeTool === 'AUTO') {
+      // 1. 先檢測是否點擊到設備
+      const clickedEq = telemetry.obstacles.find(ob => 
+        ob.type === 'equipment' && Math.sqrt((ob.x - x) ** 2 + (ob.y - y) ** 2) <= (ob.radius || 1500)
+      );
+      
+      // 2. 檢測是否點擊到 AGV
+      const clickedAgv = telemetry.agvs.find(a => 
+        Math.sqrt((a.x - x) ** 2 + (a.y - y) ** 2) <= 1500
+      );
+
+      if (!autoTaskSource) {
+          // 第一步：選擇起點站 (必須有貨且未被預約)
+          if (clickedEq) {
+              if (!clickedEq.has_goods) {
+                  alert(`[卡控] 站點 ${clickedEq.id} 目前無貨，不能作為起點。`); return;
+              }
+              const isLocked = telemetry.task_queue?.some((t: any) => t.source_id === clickedEq.id);
+              if (isLocked) {
+                  alert(`[卡控] 站點 ${clickedEq.id} 已有取貨任務正在進行，請選擇其他站點。`); return;
+              }
+              setAutoTaskSource(clickedEq.id);
+          }
+      } else {
+          // 第二步：選擇終點站或 AGV
+          if (clickedEq) {
+              if (clickedEq.id === autoTaskSource) {
+                  setAutoTaskSource(null); return; // 點同一個站點兩次 -> 取消
+              }
+              if (clickedEq.has_goods) {
+                  alert(`[卡控] 站點 ${clickedEq.id} 已有貨，不能作為終點。`); return;
+              }
+              const isLocked = telemetry.task_queue?.some((t: any) => t.target_id === clickedEq.id);
+              if (isLocked) {
+                  alert(`[卡控] 站點 ${clickedEq.id} 已被預約作為卸貨點，請選擇其他站點。`); return;
+              }
+              // 成功派發完整任務
+              sendCommand('dispatch_task', { source_id: autoTaskSource, target_id: clickedEq.id });
+              setLastMissionStatus(`✅ 已指派：${autoTaskSource} ➔ ${clickedEq.id}`);
+              setAutoTaskSource(null);
+          } else if (clickedAgv) {
+              // 點擊了 AGV：建立單向任務
+              const sourceStation = telemetry.obstacles.find(o => o.id === autoTaskSource);
+              if (sourceStation?.has_goods) {
+                  // 指派特定 AGV 去取貨
+                  if (clickedAgv.has_goods) {
+                      alert(`[卡控] 車輛 ${clickedAgv.id} 身上已有貨，不能執行取貨任務。`); return;
+                  }
+                  sendCommand('dispatch_task', { source_id: autoTaskSource, target_id: null, agv_id: clickedAgv.id });
+                  setLastMissionStatus(`📦 指派 ${clickedAgv.id} 取貨：${autoTaskSource}`);
+              } else {
+                  // 目前選取的緩衝點是空的 (可能是先點了無貨站點想卸貨)
+                  // 這裡我們假設使用者先點了無貨站點 B，再點車，代表「指定車去 B 卸貨」
+                  if (!clickedAgv.has_goods) {
+                      alert(`[卡控] 車輛 ${clickedAgv.id} 身上沒貨，不能執行卸貨任務。`); return;
+                  }
+                  sendCommand('dispatch_task', { source_id: null, target_id: autoTaskSource, agv_id: clickedAgv.id });
+                  setLastMissionStatus(`🚚 指派 ${clickedAgv.id} 卸貨：${autoTaskSource}`);
+              }
+              setAutoTaskSource(null);
+          }
+      }
     } else if (activeTool === 'BUILD_SQ' || activeTool === 'BUILD_CIR' || activeTool === 'BUILD_STAR') {
       const sx = snapToCenter(x), sy = snapToCenter(y);
       if (!telemetry.obstacles.some(ob => ob.x === sx && ob.y === sy)) {
         if (activeTool === 'BUILD_STAR') {
             const newId = `EQP-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
-            const newOb = { id: newId, type: 'equipment', x: sx, y: sy, radius: 1000, status: 'running', docking_angle: 0 };
+            const newOb = { id: newId, type: 'equipment', x: sx, y: sy, radius: 1000, status: 'running', docking_angle: 0, has_goods: false };
             sendCommand('add_obstacle', { data: newOb });
         } else {
             const newId = `ob-${Date.now()}-${Math.random().toString(36).substr(2,5)}`;
@@ -114,7 +193,6 @@ function App() {
   const handleCanvasDoubleClick = (x: number, y: number) => {
     if (!telemetry) return;
     if (activeTool !== 'BUILD_SQ' && activeTool !== 'BUILD_CIR' && activeTool !== 'BUILD_STAR') return;
-
     const clickedOb = telemetry.obstacles.find(ob => {
       if (ob.type === 'rectangle') return Math.abs(x - ob.x) <= 500 && Math.abs(y - ob.y) <= 500;
       if (ob.type === 'equipment') return Math.sqrt((ob.x - x) ** 2 + (ob.y - y) ** 2) <= (ob.radius || 1000);
@@ -128,26 +206,16 @@ function App() {
 
   const handleCommit = (field?: string, value?: any) => {
     if (!selectedObstacle) return;
-    // 移除這裡的 setIsEditing(false)，改由 onBlur 統一處理
-
     const dataToSync = { ...localObFields };
     if (field && value !== undefined) (dataToSync as any)[field] = value;
-
     if (dataToSync.id !== selectedObstacle.id) {
         if (telemetry?.obstacles.some(o => o.id === dataToSync.id && o.id !== selectedObstacle.id)) {
-            alert("ID already exists!");
-            setLocalObFields(prev => ({ ...prev, id: selectedObstacle.id }));
-            return;
+            alert("ID already exists!"); setLocalObFields(prev => ({ ...prev, id: selectedObstacle.id })); return;
         }
         sendCommand('update_obstacle', { data: { old_id: selectedObstacle.id, new_id: dataToSync.id } });
         setSelectedObId(dataToSync.id);
     } else {
-        sendCommand('update_obstacle', { data: { 
-            ...selectedObstacle, 
-            x: snapToCenter(dataToSync.x), 
-            y: snapToCenter(dataToSync.y), 
-            docking_angle: dataToSync.angle 
-        } });
+        sendCommand('update_obstacle', { data: { ...selectedObstacle, x: snapToCenter(dataToSync.x), y: snapToCenter(dataToSync.y), docking_angle: dataToSync.angle } });
     }
   };
 
@@ -155,12 +223,9 @@ function App() {
     <div className="app-container">
       <div className="sidebar left-wing">
         <h2>Multi-AGV Pro</h2>
-        
         <div className="section">
           <h3>System Control</h3>
-          <div className={`status-badge ${isConnected ? 'online' : 'offline'}`}>
-            {isConnected ? '● CONNECTED' : '○ DISCONNECTED'}
-          </div>
+          <div className={`status-badge ${isConnected ? 'online' : 'offline'}`}>{isConnected ? '● CONNECTED' : '○ DISCONNECTED'}</div>
           <div className="btn-group-grid">
             {[1, 10, 20, 30].map(m => (
               <button key={m} className={telemetry?.multiplier === m ? 'primary' : ''} onClick={() => sendCommand('set_multiplier', { data: m })}>{m}x</button>
@@ -179,18 +244,8 @@ function App() {
               <div key={a.id} className={`item-card ${selectedAgvId === a.id ? 'active' : ''}`} onClick={() => { setSelectedAgvId(a.id); setSelectedObId(null); }}>
                 <div className="item-header">
                   <span>{a.id}</span>
-                  <span style={{ 
-                    fontSize: '10px', 
-                    fontWeight: 'bold',
-                    color: a.status === 'EXECUTING' ? '#39ff14' : 
-                           a.status === 'PLANNING' ? '#ffc107' : 
-                           a.status === 'EVADING' ? '#bb86fc' :
-                           a.status === 'STUCK' ? '#ff4d4d' : '#8b949e' 
-                  }}>
-                    {a.status === 'EXECUTING' ? 'EXECUTING' :
-                     a.status === 'PLANNING' ? 'THINKING' :
-                     a.status === 'EVADING' ? 'EVADING PATH' :
-                     a.status === 'STUCK' ? 'BLOCKED' : 'STANDBY'}
+                  <span style={{ fontSize: '10px', fontWeight: 'bold', color: a.status === 'EXECUTING' ? '#39ff14' : a.status === 'PLANNING' ? '#ffc107' : a.status === 'EVADING' ? '#bb86fc' : a.status === 'STUCK' ? '#ff4d4d' : '#8b949e' }}>
+                    {a.status}
                   </span>
                 </div>
               </div>
@@ -201,19 +256,85 @@ function App() {
           </button>
         </div>
 
+        {/* 任務隊列：移到此處以方便偵錯 */}
+        <div className="section" style={{ borderTop: '1px solid #30363d', paddingTop: '15px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+            <h3 style={{ margin: 0 }}>任務隊列 ({telemetry?.task_queue.length || 0})</h3>
+            {telemetry?.task_queue.length > 0 && (
+                <button 
+                    style={{ fontSize: '9px', padding: '2px 6px', opacity: 0.6 }} 
+                    onClick={() => sendCommand('clear_tasks', {})}
+                >
+                    CLEAR
+                </button>
+            )}
+          </div>
+          <div className="fleet-list">
+            {telemetry?.task_queue.length ? telemetry.task_queue.map((t: any) => (
+              <div key={t.id} className="item-card" style={{ padding: '10px', borderLeft: t.status === 'ASSIGNED' ? '3px solid #39ff14' : '3px solid #8b949e' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                    <span style={{ fontSize: '11px', color: '#c9d1d9', fontWeight: 'bold' }}>
+                        {t.source_id ? t.source_id : 'AGV'} ➔ {t.target_id ? t.target_id : 'AGV'}
+                    </span>
+                    <button 
+                        style={{ background: 'transparent', border: 'none', color: '#ff4d4d', cursor: 'pointer', padding: '0 4px', fontSize: '12px' }}
+                        onClick={(e) => { e.stopPropagation(); sendCommand('remove_task', { task_id: t.id }); }}
+                    >
+                        ✕
+                    </button>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ 
+                        fontSize: '9px', 
+                        padding: '2px 4px', 
+                        borderRadius: '4px',
+                        background: t.status === 'ASSIGNED' ? 'rgba(57, 255, 20, 0.1)' : 'rgba(139, 148, 158, 0.1)',
+                        color: t.status === 'ASSIGNED' ? '#39ff14' : '#8b949e'
+                    }}>
+                        {t.status}
+                    </span>
+                    {t.agv_id && (
+                        <div style={{ fontSize: '9px', color: '#58a6ff' }}>
+                            車輛: {t.agv_id}
+                        </div>
+                    )}
+                </div>
+              </div>
+            )) : (
+              <div style={{ textAlign: 'center', padding: '10px', color: '#8b949e', fontSize: '11px' }}>
+                目前無等待中任務
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 任務歷史：顯示已完成的任務 */}
+        <div className="section" style={{ borderTop: '1px solid #30363d', paddingTop: '15px', marginTop: '10px' }}>
+          <h3>任務歷史 ({telemetry?.task_history?.length || 0})</h3>
+          <div className="fleet-list" style={{ maxHeight: '200px', overflowY: 'auto' }}>
+            {telemetry?.task_history?.length ? telemetry.task_history.map((t: any) => (
+              <div key={t.id} className="item-card" style={{ padding: '8px', opacity: 0.8, marginBottom: '6px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '10px', color: '#8b949e' }}>{t.source_id} ➔ {t.target_id}</span>
+                    <span style={{ fontSize: '9px', color: '#39ff14', fontWeight: 'bold' }}>✓ DONE</span>
+                </div>
+                {t.agv_id && <div style={{ fontSize: '8px', color: '#58a6ff', marginTop: '2px' }}>執行車輛: {t.agv_id}</div>}
+              </div>
+            )) : (
+              <div style={{ textAlign: 'center', padding: '10px', color: '#8b949e', fontSize: '11px' }}>
+                暫無歷史紀錄
+              </div>
+            )}
+          </div>
+        </div>
+
         {selectedObstacle && (
           <div className="section" style={{ borderTop: '1px solid #30363d', paddingTop: '15px' }}>
             <h3>Settings: {selectedObstacle.type === 'equipment' ? 'Equipment' : 'Object'}</h3>
             <div className="item-card active">
               <div className="telemetry-grid">
                 <div className="tele-item"><label>ID</label>
-                    <input type="text" 
-                        value={localObFields.id} 
-                        onFocus={() => setIsEditing(true)}
-                        onChange={(e) => setLocalObFields(prev => ({ ...prev, id: e.target.value }))} 
-                        onBlur={() => { handleCommit(); setIsEditing(false); }}
-                        onKeyDown={(e) => e.key === 'Enter' && handleCommit()}
-                    />
+                    <input type="text" value={localObFields.id} onFocus={() => setIsEditing(true)} onChange={(e) => setLocalObFields(prev => ({ ...prev, id: e.target.value }))} onBlur={() => { handleCommit(); setIsEditing(false); }} onKeyDown={(e) => e.key === 'Enter' && handleCommit()} />
                 </div>
                 {selectedObstacle.type === 'equipment' && (
                     <>
@@ -224,38 +345,24 @@ function App() {
                             <option value="error">ERROR</option>
                         </select>
                     </div>
+                    <div className="tele-item"><label>CARGO</label>
+                        <button className={selectedObstacle.has_goods ? 'warning' : 'primary'} style={{ height: '24px', fontSize: '10px', padding: '0 8px' }} onClick={() => sendCommand('update_obstacle', { data: { ...selectedObstacle, has_goods: !selectedObstacle.has_goods } })}>
+                            {selectedObstacle.has_goods ? '■ LOADED' : '□ EMPTY'}
+                        </button>
+                    </div>
                     <div className="tele-item"><label>ANGLE</label>
-                        <input type="number" min="0" max="359" 
-                            value={localObFields.angle} 
-                            onFocus={() => setIsEditing(true)}
-                            onChange={(e) => setLocalObFields(prev => ({ ...prev, angle: parseInt(e.target.value)||0 }))}
-                            onBlur={() => { handleCommit(); setIsEditing(false); }}
-                            onKeyDown={(e) => e.key === 'Enter' && handleCommit()}
-                        />
+                        <input type="number" min="0" max="359" value={localObFields.angle} onFocus={() => setIsEditing(true)} onChange={(e) => setLocalObFields(prev => ({ ...prev, angle: parseInt(e.target.value)||0 }))} onBlur={() => { handleCommit(); setIsEditing(false); }} onKeyDown={(e) => e.key === 'Enter' && handleCommit()} />
                     </div>
                     </>
                 )}
                 <div className="tele-item"><label>X</label>
-                  <input type="number" step="1000" 
-                    value={localObFields.x} 
-                    onFocus={() => setIsEditing(true)}
-                    onChange={(e) => setLocalObFields(prev => ({ ...prev, x: parseInt(e.target.value)||0 }))}
-                    onBlur={() => { handleCommit(); setIsEditing(false); }}
-                    onKeyDown={(e) => e.key === 'Enter' && handleCommit()}
-                  />
+                  <input type="number" step="1000" value={localObFields.x} onFocus={() => setIsEditing(true)} onChange={(e) => setLocalObFields(prev => ({ ...prev, x: parseInt(e.target.value)||0 }))} onBlur={() => { handleCommit(); setIsEditing(false); }} onKeyDown={(e) => e.key === 'Enter' && handleCommit()} />
                 </div>
                 <div className="tele-item"><label>Y</label>
-                  <input type="number" step="1000" 
-                    value={localObFields.y} 
-                    onFocus={() => setIsEditing(true)}
-                    onChange={(e) => setLocalObFields(prev => ({ ...prev, y: parseInt(e.target.value)||0 }))}
-                    onBlur={() => { handleCommit(); setIsEditing(false); }}
-                    onKeyDown={(e) => e.key === 'Enter' && handleCommit()}
-                  />
+                  <input type="number" step="1000" value={localObFields.y} onFocus={() => setIsEditing(true)} onChange={(e) => setLocalObFields(prev => ({ ...prev, y: parseInt(e.target.value)||0 }))} onBlur={() => { handleCommit(); setIsEditing(false); }} onKeyDown={(e) => e.key === 'Enter' && handleCommit()} />
                 </div>
               </div>
-              <button className="danger" style={{ width: '100%', marginTop: '10px' }} 
-                onClick={() => { sendCommand('remove_obstacle', { id: selectedObstacle.id }); setSelectedObId(null); }}>DELETE</button>
+              <button className="danger" style={{ width: '100%', marginTop: '10px' }} onClick={() => { sendCommand('remove_obstacle', { id: selectedObstacle.id }); setSelectedObId(null); }}>DELETE</button>
             </div>
           </div>
         )}
@@ -265,9 +372,7 @@ function App() {
             <h3>AGV Limits: {selectedAgv.id}</h3>
             <div style={{ marginTop: '5px' }}>
               <label style={{ fontSize: '10px', color: '#8b949e' }}>DRIVE LIMIT: {selectedAgv.max_rpm} RPM</label>
-              <input type="range" min="0" max="3000" step="100" value={selectedAgv.max_rpm} 
-                onChange={(e) => sendCommand('set_speed', { agv_id: selectedAgvId, data: parseInt(e.target.value) })}
-                style={{ width: '100%', accentColor: '#58a6ff' }} />
+              <input type="range" min="0" max="3000" step="100" value={selectedAgv.max_rpm} onChange={(e) => sendCommand('set_speed', { agv_id: selectedAgvId, data: parseInt(e.target.value) })} style={{ width: '100%', accentColor: '#58a6ff' }} />
             </div>
             <button className="danger" style={{ width: '100%', marginTop: '20px', opacity: 0.6 }} onClick={() => sendCommand('remove_agv', { agv_id: selectedAgvId })}>REMOVE AGV</button>
           </div>
@@ -283,6 +388,7 @@ function App() {
         <div className="toolbar-container">
           <div className="toolbar-left">
             <button className={activeTool === 'SELECT' ? 'active' : ''} onClick={() => setActiveTool('SELECT')}>🔍 SELECT</button>
+            <button className={activeTool === 'AUTO' ? 'active' : ''} onClick={() => setActiveTool('AUTO')}>🤖 AUTO</button>
             <button className={activeTool === 'BUILD_STAR' ? 'active' : ''} onClick={() => setActiveTool('BUILD_STAR')}>⭐ EQUIPMENT</button>
             <button className={activeTool === 'BUILD_SQ' ? 'active' : ''} onClick={() => setActiveTool('BUILD_SQ')}>🧱 SQUARE</button>
             <button className={activeTool === 'BUILD_CIR' ? 'active' : ''} onClick={() => setActiveTool('BUILD_CIR')}>⭕ CIRCLE</button>
@@ -290,39 +396,44 @@ function App() {
           <div className="toolbar-center">
             {selectedAgv && (
               <div className="agv-quick-controls">
-                {!selectedAgv.is_running 
-                  ? <button className="primary" onClick={() => sendCommand('start', { agv_id: selectedAgvId })}>▶ START</button>
-                  : <button className="warning" onClick={() => sendCommand('pause', { agv_id: selectedAgvId })}>⏸ PAUSE</button>
-                }
+                {!selectedAgv.is_running ? <button className="primary" onClick={() => sendCommand('start', { agv_id: selectedAgvId })}>▶ START</button> : <button className="warning" onClick={() => sendCommand('pause', { agv_id: selectedAgvId })}>⏸ PAUSE</button>}
                 <button className="danger" onClick={() => sendCommand('reset', { agv_id: selectedAgvId })}>🔄 RESET</button>
               </div>
             )}
           </div>
           <div className="toolbar-right">
-            <span className="toolbar-hint">Right-click to set target</span>
+            <div className={`status-badge ${isConnected ? 'online' : 'offline'}`} style={{ border: 'none', background: 'transparent' }}>
+                {isConnected ? 'SIGNAL OK' : 'NO SIGNAL'}
+            </div>
           </div>
         </div>
 
+        {/* 全寬度提示狀態列 */}
+        <div className="mode-status-bar">
+            {lastMissionStatus ? (
+                <span style={{ color: '#39ff14', fontWeight: 'bold' }}>{lastMissionStatus}</span>
+            ) : activeTool === 'AUTO' ? (
+                <span className="animate-pulse">
+                    {autoTaskSource 
+                        ? `【步驟 2/2】請點選「沒貨」的設備作為【終點】 (已選起點：${autoTaskSource})` 
+                        : "【步驟 1/2】請點選「有貨」的設備作為【任務起點】"}
+                </span>
+            ) : activeTool === 'SELECT' ? (
+                <span>模式：手動調測 | 選取物件查看屬性，或使用「右鍵」設定導航目標點。</span>
+            ) : (
+                <span>建築模式：點擊畫布空白處新增物件，雙擊物件可直接刪除。</span>
+            )}
+        </div>
+
         <div className="canvas-container">
-          <SimulatorCanvas 
-            telemetry={telemetry} 
-            selectedAgvId={selectedAgvId}
-            selectedObstacleId={selectedObId}
-            showSearch={showSearch}
-            onCanvasClick={handleCanvasClick}
-            onCanvasDoubleClick={handleCanvasDoubleClick}
-            onAgvSelect={(id) => { setSelectedAgvId(id); setSelectedObId(null); }}
-            onCanvasRightClick={(x, y) => {
+          <SimulatorCanvas telemetry={telemetry} selectedAgvId={selectedAgvId} selectedObstacleId={selectedObId} autoTaskSourceId={autoTaskSource} showSearch={showSearch} onCanvasClick={handleCanvasClick} onCanvasDoubleClick={handleCanvasDoubleClick} onAgvSelect={(id) => { setSelectedAgvId(id); setSelectedObId(null); }} onCanvasRightClick={(x, y) => {
               const targetId = selectedAgvId || (telemetry?.agvs.length ? telemetry.agvs[0].id : null);
               if (!targetId || !telemetry) return;
-              const clickedEq = telemetry.obstacles.find(ob => 
-                ob.type === 'equipment' && Math.sqrt((ob.x - x) ** 2 + (ob.y - y) ** 2) < (ob.radius || 1000)
-              );
+              const clickedEq = telemetry.obstacles.find(ob => ob.type === 'equipment' && Math.sqrt((ob.x - x) ** 2 + (ob.y - y) ** 2) < (ob.radius || 1000));
               const targetX = clickedEq ? clickedEq.x : snapToIntersection(x);
               const targetY = clickedEq ? clickedEq.y : snapToIntersection(y);
               sendCommand('set_target', { agv_id: targetId, data: { x: targetX, y: targetY } });
-            }}
-          />
+            }} />
         </div>
       </div>
 
@@ -341,15 +452,11 @@ function App() {
             </div>
             <div className="item-card" style={{ marginTop: '20px', borderColor: 'rgba(57, 255, 20, 0.2)' }}>
                 <div style={{ fontSize: '11px', color: '#8b949e', marginBottom: '8px' }}>Active Target</div>
-                <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#39ff14' }}>
-                    X: {selectedAgv.target.x} Y: {selectedAgv.target.y}
-                </div>
+                <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#39ff14' }}>X: {selectedAgv.target.x} Y: {selectedAgv.target.y}</div>
             </div>
           </div>
         ) : (
-          <div style={{ textAlign: 'center', padding: '40px 20px', color: '#8b949e', fontSize: '12px' }}>
-            Select an AGV to monitor real-time telemetry
-          </div>
+          <div style={{ textAlign: 'center', padding: '40px 20px', color: '#8b949e', fontSize: '12px' }}>Select an AGV to monitor real-time telemetry</div>
         )}
       </div>
     </div>
