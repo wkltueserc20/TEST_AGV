@@ -7,6 +7,16 @@ When an AGV's state changes to `IDLE`:
 3. Select the task with the minimum distance.
 4. Assign task to AGV and remove it from the `Waiting List`.
 
+## Mission Priority & Evasion
+- **Priority Rules**: AGVs with an active `current_task` have the highest priority.
+- **Evasion Behavior**: 
+  - Mission-running AGVs **NEVER** perform proactive evasion to ensure delivery efficiency.
+  - IDLE AGVs scan other AGVs' paths up to **20 meters** ahead. If a mission path intersects their current position, they trigger immediate proactive evasion to clear the way.
+
+## Resource Locking (Anti-Collision)
+- **Station Locking**: A station is locked if it is the source or target of ANY pending or active mission.
+- **Prevention**: The frontend prevents users from creating missions that involve a locked station, showing a warning message. This ensures deterministic material flow.
+
 ## AGV State Machine
 - **IDLE**: Ready for tasks.
 - **PICKING**: Navigation to Source Station. Using docking logic.

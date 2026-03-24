@@ -15,15 +15,15 @@ function App() {
   const [activeTool, setActiveTool] = useState<ToolMode>('SELECT');
   const [showSearch, setShowSearch] = useState(true);
 
-  // 本地緩衝狀態，解決輸入卡頓問題
+  // 本地緩衝狀態
   const [localObFields, setLocalObFields] = useState({ id: "", x: 0, y: 0, angle: 0 });
   const [isEditing, setIsEditing] = useState(false);
 
-  // AUTO 模式專用：存儲任務起點設備 ID
+  // AUTO 模式狀態管理
   const [autoTaskSource, setAutoTaskSource] = useState<string | null>(null);
   const [lastMissionStatus, setLastMissionStatus] = useState<string | null>(null);
 
-  // 切換模式時重置 AUTO 狀態
+  // 切換模式時重置狀態
   useEffect(() => {
     setAutoTaskSource(null);
     setLastMissionStatus(null);
@@ -54,7 +54,7 @@ function App() {
     }
   }, [selectedObId]);
 
-  // 當收到新的數據且不在編輯時，同步數值
+  // 同步遙測數值
   useEffect(() => {
     if (selectedObstacle && !isEditing) {
       setLocalObFields(prev => {
@@ -89,6 +89,11 @@ function App() {
     return Math.round(deg % 360);
   };
 
+  // 輔助：檢查站點是否被鎖定
+  const isStationLocked = (id: string) => {
+      return telemetry?.task_queue?.some((t: any) => t.source_id === id || t.target_id === id);
+  };
+
   const handleCanvasClick = (x: number, y: number) => {
     if (!telemetry) return;
 
@@ -111,63 +116,68 @@ function App() {
         setSelectedObId(null);
       }
     } else if (activeTool === 'AUTO') {
-      // 1. 先檢測是否點擊到設備
       const clickedEq = telemetry.obstacles.find(ob => 
-        ob.type === 'equipment' && Math.sqrt((ob.x - x) ** 2 + (ob.y - y) ** 2) <= (ob.radius || 1500)
+        ob.type === 'equipment' && Math.sqrt((ob.x - x) ** 2 + (ob.y - y) ** 2) <= 1500
       );
-      
-      // 2. 檢測是否點擊到 AGV
       const clickedAgv = telemetry.agvs.find(a => 
         Math.sqrt((a.x - x) ** 2 + (a.y - y) ** 2) <= 1500
       );
 
       if (!autoTaskSource) {
-          // 第一步：選擇起點站 (必須有貨且未被預約)
+          // 第一步：選取一個資源 (站點或 AGV)
           if (clickedEq) {
-              if (!clickedEq.has_goods) {
-                  alert(`[卡控] 站點 ${clickedEq.id} 目前無貨，不能作為起點。`); return;
-              }
-              const isLocked = telemetry.task_queue?.some((t: any) => t.source_id === clickedEq.id);
-              if (isLocked) {
-                  alert(`[卡控] 站點 ${clickedEq.id} 已有取貨任務正在進行，請選擇其他站點。`); return;
+              if (isStationLocked(clickedEq.id)) {
+                  alert(`[卡控] 站點 ${clickedEq.id} 已有任務進行中。`); return;
               }
               setAutoTaskSource(clickedEq.id);
+          } else if (clickedAgv) {
+              setAutoTaskSource(clickedAgv.id);
           }
       } else {
-          // 第二步：選擇終點站或 AGV
+          // 第二步：完成任務指派
+          const sourceIsAgv = telemetry.agvs.some(a => a.id === autoTaskSource);
+          
           if (clickedEq) {
-              if (clickedEq.id === autoTaskSource) {
-                  setAutoTaskSource(null); return; // 點同一個站點兩次 -> 取消
+              if (clickedEq.id === autoTaskSource) { setAutoTaskSource(null); return; }
+              if (isStationLocked(clickedEq.id)) { alert(`[卡控] 站點 ${clickedEq.id} 已被佔用。`); return; }
+
+              if (sourceIsAgv) {
+                  // 車 ➔ 站點
+                  const agv = telemetry.agvs.find(a => a.id === autoTaskSource);
+                  if (agv?.has_goods) {
+                      if (clickedEq.has_goods) { alert("[卡控] 站點已有貨，無法卸貨。"); return; }
+                      sendCommand('dispatch_task', { source_id: null, target_id: clickedEq.id, agv_id: agv.id });
+                      setLastMissionStatus(`🚚 指派 ${agv.id} ➔ ${clickedEq.id} (卸貨)`);
+                  } else {
+                      if (!clickedEq.has_goods) { alert("[卡控] 站點沒貨，無法取貨。"); return; }
+                      sendCommand('dispatch_task', { source_id: clickedEq.id, target_id: null, agv_id: agv.id });
+                      setLastMissionStatus(`📦 指派 ${agv.id} ➔ ${clickedEq.id} (取貨)`);
+                  }
+              } else {
+                  // 站點 ➔ 站點 (自動調度)
+                  const sEq = telemetry.obstacles.find(o => o.id === autoTaskSource);
+                  if (sEq?.has_goods && !clickedEq.has_goods) {
+                      sendCommand('dispatch_task', { source_id: autoTaskSource, target_id: clickedEq.id });
+                      setLastMissionStatus(`✅ 已建立搬運任務：${autoTaskSource} ➔ ${clickedEq.id}`);
+                  } else {
+                      alert("[卡控] 搬運任務必須從「有貨站點」到「無貨站點」。");
+                  }
               }
-              if (clickedEq.has_goods) {
-                  alert(`[卡控] 站點 ${clickedEq.id} 已有貨，不能作為終點。`); return;
-              }
-              const isLocked = telemetry.task_queue?.some((t: any) => t.target_id === clickedEq.id);
-              if (isLocked) {
-                  alert(`[卡控] 站點 ${clickedEq.id} 已被預約作為卸貨點，請選擇其他站點。`); return;
-              }
-              // 成功派發完整任務
-              sendCommand('dispatch_task', { source_id: autoTaskSource, target_id: clickedEq.id });
-              setLastMissionStatus(`✅ 已指派：${autoTaskSource} ➔ ${clickedEq.id}`);
               setAutoTaskSource(null);
           } else if (clickedAgv) {
-              // 點擊了 AGV：建立單向任務
-              const sourceStation = telemetry.obstacles.find(o => o.id === autoTaskSource);
-              if (sourceStation?.has_goods) {
-                  // 指派特定 AGV 去取貨
-                  if (clickedAgv.has_goods) {
-                      alert(`[卡控] 車輛 ${clickedAgv.id} 身上已有貨，不能執行取貨任務。`); return;
+              if (clickedAgv.id === autoTaskSource) { setAutoTaskSource(null); return; }
+              if (!sourceIsAgv) {
+                  // 站點 ➔ 車 (與 車 ➔ 站點 邏輯相同)
+                  const sEq = telemetry.obstacles.find(o => o.id === autoTaskSource);
+                  if (sEq?.has_goods) {
+                      if (clickedAgv.has_goods) { alert("[卡控] 車身已有貨，無法取貨。"); return; }
+                      sendCommand('dispatch_task', { source_id: autoTaskSource, target_id: null, agv_id: clickedAgv.id });
+                      setLastMissionStatus(`📦 指派 ${clickedAgv.id} 取貨：${autoTaskSource}`);
+                  } else {
+                      if (!clickedAgv.has_goods) { alert("[卡控] 車身沒貨，無法卸貨。"); return; }
+                      sendCommand('dispatch_task', { source_id: null, target_id: autoTaskSource, agv_id: clickedAgv.id });
+                      setLastMissionStatus(`🚚 指派 ${clickedAgv.id} 卸貨：${autoTaskSource}`);
                   }
-                  sendCommand('dispatch_task', { source_id: autoTaskSource, target_id: null, agv_id: clickedAgv.id });
-                  setLastMissionStatus(`📦 指派 ${clickedAgv.id} 取貨：${autoTaskSource}`);
-              } else {
-                  // 目前選取的緩衝點是空的 (可能是先點了無貨站點想卸貨)
-                  // 這裡我們假設使用者先點了無貨站點 B，再點車，代表「指定車去 B 卸貨」
-                  if (!clickedAgv.has_goods) {
-                      alert(`[卡控] 車輛 ${clickedAgv.id} 身上沒貨，不能執行卸貨任務。`); return;
-                  }
-                  sendCommand('dispatch_task', { source_id: null, target_id: autoTaskSource, agv_id: clickedAgv.id });
-                  setLastMissionStatus(`🚚 指派 ${clickedAgv.id} 卸貨：${autoTaskSource}`);
               }
               setAutoTaskSource(null);
           }
@@ -219,6 +229,18 @@ function App() {
     }
   };
 
+  const getAutoHint = () => {
+      if (!autoTaskSource) return "【步驟 1/2】請點選一個「設備」或「AGV」作為任務起點";
+      const source = telemetry?.obstacles.find(o => o.id === autoTaskSource) || telemetry?.agvs.find(a => a.id === autoTaskSource);
+      const isAgv = telemetry?.agvs.some(a => a.id === autoTaskSource);
+      
+      if (isAgv) {
+          return `【步驟 2/2】已選車輛：${autoTaskSource} (${(source as any).has_goods ? '載貨中' : '空車'})。請點選一個站點執行${(source as any).has_goods ? '卸貨' : '取貨'}`;
+      } else {
+          return `【步驟 2/2】已選站點：${autoTaskSource} (${(source as any).has_goods ? '有貨' : '沒貨'})。請點選「另一個站點」或「一台 AGV」完成指派`;
+      }
+  };
+
   return (
     <div className="app-container">
       <div className="sidebar left-wing">
@@ -243,7 +265,7 @@ function App() {
             {telemetry?.agvs.map(a => (
               <div key={a.id} className={`item-card ${selectedAgvId === a.id ? 'active' : ''}`} onClick={() => { setSelectedAgvId(a.id); setSelectedObId(null); }}>
                 <div className="item-header">
-                  <span>{a.id}</span>
+                  <span>{a.id} {a.has_goods ? '📦' : ''}</span>
                   <span style={{ fontSize: '10px', fontWeight: 'bold', color: a.status === 'EXECUTING' ? '#39ff14' : a.status === 'PLANNING' ? '#ffc107' : a.status === 'EVADING' ? '#bb86fc' : a.status === 'STUCK' ? '#ff4d4d' : '#8b949e' }}>
                     {a.status}
                   </span>
@@ -256,75 +278,39 @@ function App() {
           </button>
         </div>
 
-        {/* 任務隊列：移到此處以方便偵錯 */}
         <div className="section" style={{ borderTop: '1px solid #30363d', paddingTop: '15px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-            <h3 style={{ margin: 0 }}>任務隊列 ({telemetry?.task_queue.length || 0})</h3>
-            {telemetry?.task_queue.length > 0 && (
-                <button 
-                    style={{ fontSize: '9px', padding: '2px 6px', opacity: 0.6 }} 
-                    onClick={() => sendCommand('clear_tasks', {})}
-                >
-                    CLEAR
-                </button>
-            )}
+            <h3 style={{ margin: 0 }}>任務隊列 ({telemetry?.task_queue?.length || 0})</h3>
+            {telemetry?.task_queue?.length > 0 && <button style={{ fontSize: '9px', padding: '2px 6px', opacity: 0.6 }} onClick={() => sendCommand('clear_tasks', {})}>CLEAR</button>}
           </div>
           <div className="fleet-list">
-            {telemetry?.task_queue.length ? telemetry.task_queue.map((t: any) => (
+            {telemetry?.task_queue?.length ? telemetry.task_queue.map((t: any) => (
               <div key={t.id} className="item-card" style={{ padding: '10px', borderLeft: t.status === 'ASSIGNED' ? '3px solid #39ff14' : '3px solid #8b949e' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                    <span style={{ fontSize: '11px', color: '#c9d1d9', fontWeight: 'bold' }}>
-                        {t.source_id ? t.source_id : 'AGV'} ➔ {t.target_id ? t.target_id : 'AGV'}
-                    </span>
-                    <button 
-                        style={{ background: 'transparent', border: 'none', color: '#ff4d4d', cursor: 'pointer', padding: '0 4px', fontSize: '12px' }}
-                        onClick={(e) => { e.stopPropagation(); sendCommand('remove_task', { task_id: t.id }); }}
-                    >
-                        ✕
-                    </button>
+                    <span style={{ fontSize: '11px', color: '#c9d1d9', fontWeight: 'bold' }}>{t.source_id || 'AGV'} ➔ {t.target_id || 'AGV'}</span>
+                    <button style={{ background: 'transparent', border: 'none', color: '#ff4d4d', cursor: 'pointer', padding: '0 4px', fontSize: '12px' }} onClick={(e) => { e.stopPropagation(); sendCommand('remove_task', { task_id: t.id }); }}>✕</button>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ 
-                        fontSize: '9px', 
-                        padding: '2px 4px', 
-                        borderRadius: '4px',
-                        background: t.status === 'ASSIGNED' ? 'rgba(57, 255, 20, 0.1)' : 'rgba(139, 148, 158, 0.1)',
-                        color: t.status === 'ASSIGNED' ? '#39ff14' : '#8b949e'
-                    }}>
-                        {t.status}
-                    </span>
-                    {t.agv_id && (
-                        <div style={{ fontSize: '9px', color: '#58a6ff' }}>
-                            車輛: {t.agv_id}
-                        </div>
-                    )}
+                    <span style={{ fontSize: '9px', padding: '2px 4px', borderRadius: '4px', background: t.status === 'ASSIGNED' ? 'rgba(57, 255, 20, 0.1)' : 'rgba(139, 148, 158, 0.1)', color: t.status === 'ASSIGNED' ? '#39ff14' : '#8b949e' }}>{t.status}</span>
+                    {t.agv_id && <div style={{ fontSize: '9px', color: '#58a6ff' }}>車輛: {t.agv_id}</div>}
                 </div>
               </div>
-            )) : (
-              <div style={{ textAlign: 'center', padding: '10px', color: '#8b949e', fontSize: '11px' }}>
-                目前無等待中任務
-              </div>
-            )}
+            )) : <div style={{ textAlign: 'center', padding: '10px', color: '#8b949e', fontSize: '11px' }}>目前無等待中任務</div>}
           </div>
         </div>
 
-        {/* 任務歷史：顯示已完成的任務 */}
         <div className="section" style={{ borderTop: '1px solid #30363d', paddingTop: '15px', marginTop: '10px' }}>
           <h3>任務歷史 ({telemetry?.task_history?.length || 0})</h3>
           <div className="fleet-list" style={{ maxHeight: '200px', overflowY: 'auto' }}>
             {telemetry?.task_history?.length ? telemetry.task_history.map((t: any) => (
               <div key={t.id} className="item-card" style={{ padding: '8px', opacity: 0.8, marginBottom: '6px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: '10px', color: '#8b949e' }}>{t.source_id} ➔ {t.target_id}</span>
+                    <span style={{ fontSize: '10px', color: '#8b949e' }}>{t.source_id || 'AGV'} ➔ {t.target_id || 'AGV'}</span>
                     <span style={{ fontSize: '9px', color: '#39ff14', fontWeight: 'bold' }}>✓ DONE</span>
                 </div>
                 {t.agv_id && <div style={{ fontSize: '8px', color: '#58a6ff', marginTop: '2px' }}>執行車輛: {t.agv_id}</div>}
               </div>
-            )) : (
-              <div style={{ textAlign: 'center', padding: '10px', color: '#8b949e', fontSize: '11px' }}>
-                暫無歷史紀錄
-              </div>
-            )}
+            )) : <div style={{ textAlign: 'center', padding: '10px', color: '#8b949e', fontSize: '11px' }}>暫無歷史紀錄</div>}
           </div>
         </div>
 
@@ -402,27 +388,12 @@ function App() {
             )}
           </div>
           <div className="toolbar-right">
-            <div className={`status-badge ${isConnected ? 'online' : 'offline'}`} style={{ border: 'none', background: 'transparent' }}>
-                {isConnected ? 'SIGNAL OK' : 'NO SIGNAL'}
-            </div>
+            <div className={`status-badge ${isConnected ? 'online' : 'offline'}`} style={{ border: 'none', background: 'transparent' }}>{isConnected ? 'SIGNAL OK' : 'NO SIGNAL'}</div>
           </div>
         </div>
 
-        {/* 全寬度提示狀態列 */}
         <div className="mode-status-bar">
-            {lastMissionStatus ? (
-                <span style={{ color: '#39ff14', fontWeight: 'bold' }}>{lastMissionStatus}</span>
-            ) : activeTool === 'AUTO' ? (
-                <span className="animate-pulse">
-                    {autoTaskSource 
-                        ? `【步驟 2/2】請點選「沒貨」的設備作為【終點】 (已選起點：${autoTaskSource})` 
-                        : "【步驟 1/2】請點選「有貨」的設備作為【任務起點】"}
-                </span>
-            ) : activeTool === 'SELECT' ? (
-                <span>模式：手動調測 | 選取物件查看屬性，或使用「右鍵」設定導航目標點。</span>
-            ) : (
-                <span>建築模式：點擊畫布空白處新增物件，雙擊物件可直接刪除。</span>
-            )}
+            {lastMissionStatus ? <span style={{ color: '#39ff14', fontWeight: 'bold' }}>{lastMissionStatus}</span> : activeTool === 'AUTO' ? <span className="animate-pulse">{getAutoHint()}</span> : activeTool === 'SELECT' ? <span>模式：手動調測 | 選取物件查看屬性，或使用「右鍵」設定導航目標點。</span> : <span>建築模式：點擊畫布空白處新增物件，雙擊物件可直接刪除。</span>}
         </div>
 
         <div className="canvas-container">
@@ -455,9 +426,7 @@ function App() {
                 <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#39ff14' }}>X: {selectedAgv.target.x} Y: {selectedAgv.target.y}</div>
             </div>
           </div>
-        ) : (
-          <div style={{ textAlign: 'center', padding: '40px 20px', color: '#8b949e', fontSize: '12px' }}>Select an AGV to monitor real-time telemetry</div>
-        )}
+        ) : <div style={{ textAlign: 'center', padding: '40px 20px', color: '#8b949e', fontSize: '12px' }}>Select an AGV to monitor real-time telemetry</div>}
       </div>
     </div>
   );

@@ -96,6 +96,7 @@ class AGV:
                 else: self.status = AGVStatus.STUCK
                 return
             path, visited = self.planner.get_path([self.x, self.y], [self.target["x"], self.target["y"]], obstacles, static_costmap=static_costmap, world=world)
+            if not path: self.global_path = []; return
             self.global_path = path; self.visited_nodes = visited
             if self.status != AGVStatus.EVADING:
                 self.status = AGVStatus.EXECUTING if self.is_running else AGVStatus.IDLE
@@ -130,10 +131,16 @@ class AGV:
                     self.status = AGVStatus.IDLE; self.is_running = False; self.current_task = None
             self.l_rpm, self.r_rpm = 0, 0; return
 
-        # 2. 路徑規劃請求
+        # 2. 路徑規劃與避讓檢查
         if self.replan_needed and not self.is_planning:
             all_obs = world.obstacles + world.get_dynamic_obstacles(exclude_agv_id=self.id)
             threading.Thread(target=self._async_replan, args=(all_obs, world.static_costmap, world), daemon=True).start()
+
+        self._last_compute_time += dt
+        # 定期檢查避讓
+        if self._last_compute_time >= 0.05:
+            if self.status != AGVStatus.LOADING and self.status != AGVStatus.UNLOADING:
+                self.check_proactive_evasion(world)
 
         # 3. 路徑佔用發布
         if self.global_path and self.is_running:
@@ -148,14 +155,15 @@ class AGV:
             self.v = 0; self.omega = 0; self.l_rpm, self.r_rpm = 0, 0; return
 
         # 4. 控制指令計算
-        self._last_compute_time += dt
         if self._last_compute_time >= 0.05:
             self._last_compute_time = 0.0
             all_obs = world.obstacles + world.get_dynamic_obstacles(exclude_agv_id=self.id)
+            
             min_dist = float("inf"); closest_idx = 0
             for i, wp in enumerate(self.global_path):
                 d = (wp[0]-self.x)**2 + (wp[1]-self.y)**2
                 if d < min_dist: min_dist = d; closest_idx = i
+            
             lookahead = max(1, int(4 + abs(self.v) / 100.0))
             target_wp = self.global_path[min(closest_idx + lookahead, len(self.global_path)-1)]
             
@@ -181,20 +189,31 @@ class AGV:
                 elif dist <= 1950: force_forward = True
 
             if goto_ctrl:
-                bv, bo, culprit = self.controller.compute_command(self.x, self.y, self.theta, self.v, self.omega, target_wp, max_speed, all_obs, dt=0.05, force_forward=force_forward)
+                ignore_id = self.culprit_id if self.status == AGVStatus.EVADING else None
+                bv, bo, culprit = self.controller.compute_command(self.x, self.y, self.theta, self.v, self.omega, target_wp, max_speed, all_obs, dt=0.05, force_forward=force_forward, ignore_id=ignore_id)
                 self.target_v, self.target_omega = bv, bo; self.culprit_id = culprit
 
-        # 5. 物理更新
+        # 5. 物理更新與安全檢查
         self.v, self.omega = self.controller.limit_physics(self.target_v, self.target_omega, self.v, self.omega, self.max_rpm * self.kinematics.rpm_to_mms, dt)
-        self.x, self.y, self.theta = self.kinematics.update_pose(self.x, self.y, self.theta, self.v, self.omega, dt)
+        new_x, new_y, new_theta = self.kinematics.update_pose(self.x, self.y, self.theta, self.v, self.omega, dt)
+        
+        # 安全檢查
+        all_obs = world.obstacles + world.get_dynamic_obstacles(exclude_agv_id=self.id)
+        margin = 505 if self.status == AGVStatus.EVADING else 525
+        safe, _ = self.controller.is_pose_safe(new_x, new_y, new_theta, all_obs, margin=margin)
+        if safe:
+            self.x, self.y, self.theta = new_x, new_y, new_theta
+        else:
+            self.v = 0; self.omega = 0; self.target_v = 0; self.target_omega = 0
 
         # 6. 任務完成判定
         dist_final = math.sqrt((self.x - self.target["x"])**2 + (self.y - self.target["y"])**2)
         if dist_final < 300:
             if self.current_task:
-                # 判斷是裝料還是卸料
-                is_source = (self.target["x"] == next((o["x"] for o in world.obstacles if o["id"] == self.current_task.get("source_id")), None))
-                if is_source and not self.has_goods:
+                source_x = next((o["x"] for o in world.obstacles if o["id"] == self.current_task.get("source_id")), None)
+                source_y = next((o["y"] for o in world.obstacles if o["id"] == self.current_task.get("source_id")), None)
+                is_at_source = (abs(self.target["x"] - source_x) < 10 and abs(self.target["y"] - source_y) < 10) if source_x else False
+                if is_at_source and not self.has_goods:
                     self.status = AGVStatus.LOADING; self.task_timer = 5.0
                 else:
                     self.status = AGVStatus.UNLOADING; self.task_timer = 5.0
@@ -202,3 +221,31 @@ class AGV:
             else:
                 self.is_running = False; self.status = AGVStatus.IDLE; self.v = 0; self.omega = 0
         self.l_rpm, self.r_rpm = self.kinematics.velocity_to_rpm(self.v, self.omega)
+
+    def check_proactive_evasion(self, world) -> bool:
+        # --- 關鍵修正 2：正在執行物流任務的車輛擁有最高優先權，不進行避讓 ---
+        if self.current_task is not None:
+            return False
+            
+        if self.status == AGVStatus.EVADING: return False
+        
+        for other_id, other_agv in world.agvs.items():
+            if other_id == self.id: continue
+            
+            # 獲取其他車輛的規劃路徑投影
+            path_points = world.path_occupancy.get(other_id, [])
+            if not path_points: continue
+            
+            # --- 關鍵修正 1：擴大掃描範圍，實現「提前閃車」 ---
+            # 檢查對方前方 100 個路徑點 (約 20 米) 是否會經過我目前的位置
+            # 只要對方路徑會穿過我 2.5 米內，我就必須讓路
+            for px, py in path_points[:100]: 
+                if math.sqrt((px - self.x)**2 + (py - self.y)**2) < 2500:
+                    logger.info(f"AGV {self.id} is in the way of {other_id}'s path. Triggering proactive evasion.")
+                    self.trigger_evasion(world)
+                    return True
+        return False
+
+    def trigger_evasion(self, world):
+        all_obs = world.obstacles + world.get_dynamic_obstacles(exclude_agv_id=self.id)
+        threading.Thread(target=self._async_replan, args=(all_obs, world.static_costmap, world, self.status, True), daemon=True).start()

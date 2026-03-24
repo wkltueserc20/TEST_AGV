@@ -417,8 +417,10 @@ const SimulatorCanvas: React.FC<Props> = ({
             if (clickedEq) onCanvasClick(x, y);
             else {
                 const clickedAgv = currentTelemetry?.agvs.find(a => Math.sqrt((a.x-x)**2+(a.y-y)**2) < 1500);
-                if (clickedAgv) onAgvSelect(clickedAgv.id);
-                else onCanvasClick(x, y);
+                if (clickedAgv) {
+                    onAgvSelect(clickedAgv.id);
+                    onCanvasClick(x, y); // 修正：同時觸發畫布點擊，支援 AUTO 模式下的指派
+                } else onCanvasClick(x, y);
             }
         }} 
         onDoubleClick={(e) => handleInteraction(e, onCanvasDoubleClick)}
