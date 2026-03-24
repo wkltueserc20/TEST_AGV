@@ -97,6 +97,9 @@ class World:
                 if ob['type'] == 'rectangle':
                     w, h = ob.get('width', 1000), ob.get('height', 1000)
                     obs_geoms.append(('rect', ob['x'] - w/2, ob['y'] - h/2, ob['x'] + w/2, ob['y'] + h/2))
+                elif ob['type'] == 'equipment':
+                    # 設備為 2m x 2m，半徑 1000mm
+                    obs_geoms.append(('equipment', ob['x'], ob['y'], ob.get('radius', 1000)))
                 else:
                     obs_geoms.append(('circle', ob['x'], ob['y'], ob.get('radius', 500)))
             
@@ -105,16 +108,25 @@ class World:
                 for gy in range(self.ny):
                     wy = gy * self.grid_res
                     min_d = min(wx, self.width - wx, wy, self.height - wy)
+                    
                     for kind, *data in obs_geoms:
                         if kind == 'rect':
                             dx = max(data[0] - wx, 0, wx - data[2])
                             dy = max(data[1] - wy, 0, wy - data[3])
                             d = math.sqrt(dx**2 + dy**2)
                         else:
+                            # 圓形、設備都統一處理為圓形幾何
                             d = math.sqrt((data[0] - wx)**2 + (data[1] - wy)**2) - data[2]
+                        
                         if d < min_d: min_d = d
-                    if min_d < 550: new_map[gx, gy] = 1000000.0
-                    elif min_d < 2000: new_map[gx, gy] = (2000.0 / min_d) ** 4
+                    
+                    # 恢復最簡單的障礙物邏輯：離任何障礙物邊緣 550mm 以內都是無限成本 (牆壁)
+                    if min_d < 550: 
+                        new_map[gx, gy] = 1000000.0
+                    elif min_d < 2000: 
+                        new_map[gx, gy] = (2000.0 / min_d) ** 4
+                    else:
+                        new_map[gx, gy] = 0.0
             
             with self._map_lock:
                 self.static_costmap = new_map
@@ -138,9 +150,19 @@ class World:
             self.save_obstacles()
 
     def update_obstacle(self, ob_data: Dict[str, Any]):
+        # 支援 ID 重新命名：old_id -> new_id
+        target_id = ob_data.get("old_id") or ob_data.get("id")
+        new_id = ob_data.get("new_id")
+        
         for ob in self.obstacles:
-            if str(ob.get("id")) == str(ob_data.get("id")):
-                ob.update(ob_data); break
+            if str(ob.get("id")) == str(target_id):
+                if new_id:
+                    ob["id"] = new_id
+                # 更新其他屬性
+                for k, v in ob_data.items():
+                    if k not in ["id", "old_id", "new_id"]:
+                        ob[k] = v
+                break
         self.save_obstacles()
 
     def clear_obstacles(self):

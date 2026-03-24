@@ -70,20 +70,41 @@ body {
   border-bottom: 1px solid var(--border-main);
   display: flex;
   align-items: center;
+  justify-content: space-between; /* 分成左中右 */
   padding: 0 16px;
-  gap: 12px;
   z-index: 50;
+}
+
+.toolbar-left, .toolbar-center, .toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toolbar-center {
+  flex: 1;
+  justify-content: center;
+}
+
+.agv-quick-controls {
+  display: flex;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 4px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--border-main);
 }
 
 .toolbar-container button {
   background: var(--bg-card);
   border: 1px solid var(--border-main);
   padding: 6px 12px;
-  font-size: 14px;
+  font-size: 13px;
   height: 32px;
   display: flex;
   align-items: center;
   gap: 6px;
+  border-radius: 6px;
 }
 
 .toolbar-container button.active {
@@ -95,7 +116,6 @@ body {
 .toolbar-hint {
   font-size: 11px;
   color: var(--text-muted);
-  margin-left: auto; /* 推到最右邊 */
   font-style: italic;
 }
 

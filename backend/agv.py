@@ -54,7 +54,6 @@ class AGV:
         self.target_omega = 0.0
         self.evasion_target: Optional[Dict[str, float]] = None
 
-        # 從狀態字典恢復 (記憶功能)
         if state_dict:
             self.x = state_dict.get("x", self.x)
             self.y = state_dict.get("y", self.y)
@@ -63,7 +62,6 @@ class AGV:
             self.mode = AGVMode(state_dict.get("mode", self.mode))
             self.max_rpm = state_dict.get("max_rpm", self.max_rpm)
             self.status = AGVStatus(state_dict.get("status", self.status))
-            # 注意：is_running 不自動恢復為 True，安全性考量需手動啟動
             self.is_running = False 
             self.replan_needed = True if self.target != {"x": self.x, "y": self.y} else False
 
@@ -122,13 +120,6 @@ class AGV:
                 self.status = AGVStatus.EXECUTING if self.is_running else AGVStatus.IDLE
         finally:
             self.is_planning = False; self.replan_needed = False
-
-    def is_conflicted(self, world) -> bool:
-        for other_id, points in world.path_occupancy.items():
-            if other_id == self.id: continue
-            for px, py in points:
-                if math.sqrt((px - self.x)**2 + (py - self.y)**2) < 1500: return True
-        return False
 
     def update(self, dt: float, world):
         if self.replan_needed and not self.is_planning:
@@ -200,14 +191,65 @@ class AGV:
                             if dist < 2000: current_max_speed = 0.0 
                             else: current_max_speed = 100.0 
 
-            ignore_id = self.culprit_id if self.status == AGVStatus.EVADING else None
-            bv, bo, culprit = self.controller.compute_command(
-                self.x, self.y, self.theta, self.v, self.omega, 
-                target_wp, current_max_speed, all_obs, margin=margin, dt=0.05, ignore_id=ignore_id, status=self.status
-            )
-            self.target_v, self.target_omega = bv, bo; self.culprit_id = culprit; self._last_compute_time = 0.0
-            if self.target_v == 0 and self.target_omega == 0: self.status = AGVStatus.STUCK
-            else: self.status = AGVStatus.EXECUTING if self.status != AGVStatus.EVADING else AGVStatus.EVADING
+            # --- 智慧對接：進入設備前先對齊角度 ---
+            is_docking_approach = False
+            target_docking_angle = None
+            if len(self.global_path) > 0:
+                final_wp = self.global_path[-1]
+                for ob in world.obstacles:
+                    if ob.get('type') == 'equipment' and ob['x'] == final_wp[0] and ob['y'] == final_wp[1]:
+                        target_docking_angle = ob.get('docking_angle')
+                        dist_to_final = math.sqrt((self.x - final_wp[0])**2 + (self.y - final_wp[1])**2)
+                        # 如果距離終點 2200mm 以內，視為進入「門口對齊區」
+                        if dist_to_final < 2200:
+                            is_docking_approach = True
+                        break
+
+            goto_controller = True
+            force_forward_val = False
+
+            if is_docking_approach and target_docking_angle is not None:
+                target_rad = (target_docking_angle * math.pi) / 180.0
+                angle_error = math.atan2(math.sin(target_rad - self.theta), math.cos(target_rad - self.theta))
+                dist_to_final = math.sqrt((self.x - final_wp[0])**2 + (self.y - final_wp[1])**2)
+                
+                # 提前減速區：從 4000mm 開始 (跑道入口)
+                if dist_to_final < 4000:
+                    if abs(angle_error) > 0.15: 
+                        current_max_speed = min(current_max_speed, 100.0) # 角度差太大，強迫極低速
+                    elif abs(angle_error) > 0.05: 
+                        current_max_speed = min(current_max_speed, 200.0)
+
+                # 門口停靠點：2000mm 處 (給予一點緩衝 1950-2050)
+                if dist_to_final > 1950:
+                    if dist_to_final < 2100:
+                        # 快到 2 米點了，減速準備停下
+                        current_max_speed = min(current_max_speed, 80.0)
+                else:
+                    # 在 2000mm 處強制停下對齊
+                    if dist_to_final > 1000 and abs(angle_error) > 0.04: 
+                        if abs(self.v) > 20.0:
+                            current_max_speed = 0.0 
+                        else:
+                            self.target_v = 0.0
+                            self.target_omega = np.clip(angle_error * 2.5, -1.2, 1.2)
+                            goto_controller = False 
+                    else:
+                        force_forward_val = True
+
+            if goto_controller:
+                ignore_id = self.culprit_id if self.status == AGVStatus.EVADING else None
+                bv, bo, culprit = self.controller.compute_command(
+                    self.x, self.y, self.theta, self.v, self.omega, 
+                    target_wp, current_max_speed, all_obs, margin=margin, dt=0.05, 
+                    ignore_id=ignore_id, status=self.status, force_forward=force_forward_val
+                )
+                self.target_v, self.target_omega = bv, bo; self.culprit_id = culprit; self._last_compute_time = 0.0
+            
+            if self.target_v == 0 and self.target_omega == 0 and not is_docking_approach:
+                self.status = AGVStatus.STUCK
+            else:
+                self.status = AGVStatus.EXECUTING if self.status != AGVStatus.EVADING else AGVStatus.EVADING
 
         if self.status == AGVStatus.STUCK and self.v == 0:
             if not self.stuck_start_time: self.stuck_start_time = time.time()
@@ -235,8 +277,28 @@ class AGV:
                         if not safe: self.v = 0; self.omega = 0; break
                     self.x, self.y, self.theta = new_x, new_y, new_theta
             remaining_dt -= step
-        if math.sqrt((self.x - self.target["x"])**2 + (self.y - self.target["y"])**2) < 300:
-            self.is_running = False; self.status = AGVStatus.IDLE; self.v = 0; self.omega = 0; self.evasion_target = None; world.release_haven(self.id)
+
+        if self.mode == AGVMode.SIMULATION:
+            dist_to_target = math.sqrt((self.x - self.target["x"])**2 + (self.y - self.target["y"])**2)
+            target_docking_angle = None
+            for ob in world.obstacles:
+                if ob.get('type') == 'equipment' and ob['x'] == self.target["x"] and ob['y'] == self.target["y"]:
+                    target_docking_angle = ob.get('docking_angle')
+                    break
+            angle_error = 0.0
+            if target_docking_angle is not None:
+                target_rad = (target_docking_angle * math.pi) / 180.0
+                angle_error = math.atan2(math.sin(target_rad - self.theta), math.cos(target_rad - self.theta))
+
+            if dist_to_target < 300:
+                if target_docking_angle is not None and abs(angle_error) > 0.05: 
+                    self.v = 0.0; self.target_v = 0.0
+                    self.target_omega = np.clip(angle_error * 2.0, -1.0, 1.0)
+                    self.status = AGVStatus.EXECUTING
+                else:
+                    self.is_running = False; self.status = AGVStatus.IDLE
+                    self.v = 0; self.omega = 0; self.evasion_target = None; world.release_haven(self.id)
+            
         self.l_rpm, self.r_rpm = self.kinematics.velocity_to_rpm(self.v, self.omega)
 
     def check_proactive_evasion(self, world) -> bool:

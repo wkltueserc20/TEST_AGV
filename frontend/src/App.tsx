@@ -5,7 +5,7 @@ import SimulatorCanvas from './SimulatorCanvas';
 import './App.css';
 
 // 移除 NAV 模式，目標設定改為全域右鍵功能
-type ToolMode = 'SELECT' | 'BUILD_SQ' | 'BUILD_CIR';
+type ToolMode = 'SELECT' | 'BUILD_SQ' | 'BUILD_CIR' | 'BUILD_STAR';
 
 function App() {
   const { telemetry, isConnected, sendCommand } = useSimulation('ws://localhost:8000/ws');
@@ -14,6 +14,12 @@ function App() {
   const [addAgvMode, setAddAgvMode] = useState(false);
   const [activeTool, setActiveTool] = useState<ToolMode>('SELECT');
   const [showSearch, setShowSearch] = useState(true);
+
+  const [editingId, setEditingId] = useState("");
+
+  useEffect(() => {
+    if (selectedObstacle) setEditingId(selectedObstacle.id);
+  }, [selectedObId]);
 
   useEffect(() => {
     if (telemetry?.agvs.length && !selectedAgvId) {
@@ -45,6 +51,7 @@ function App() {
     if (activeTool === 'SELECT') {
       const clickedOb = telemetry.obstacles.find(ob => {
         if (ob.type === 'rectangle') return Math.abs(x - ob.x) <= 500 && Math.abs(y - ob.y) <= 500;
+        if (ob.type === 'equipment') return Math.sqrt((ob.x - x) ** 2 + (ob.y - y) ** 2) <= (ob.radius || 1000);
         return Math.sqrt((ob.x - x) ** 2 + (ob.y - y) ** 2) <= (ob.radius || 500);
       });
       if (clickedOb) {
@@ -53,26 +60,31 @@ function App() {
       } else {
         setSelectedObId(null);
       }
-    } else if (activeTool === 'BUILD_SQ' || activeTool === 'BUILD_CIR') {
+    } else if (activeTool === 'BUILD_SQ' || activeTool === 'BUILD_CIR' || activeTool === 'BUILD_STAR') {
       const sx = snapToCenter(x), sy = snapToCenter(y);
       if (!telemetry.obstacles.some(ob => ob.x === sx && ob.y === sy)) {
-        const newId = `ob-${Date.now()}-${Math.random().toString(36).substr(2,5)}`;
-        const newOb = activeTool === 'BUILD_SQ' 
-          ? { id: newId, type: 'rectangle', x: sx, y: sy, width: 1000, height: 1000, angle: 0 }
-          : { id: newId, type: 'circle', x: sx, y: sy, radius: 500 };
-        sendCommand('add_obstacle', { data: newOb });
+        if (activeTool === 'BUILD_STAR') {
+            const newId = `EQP-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+            const newOb = { id: newId, type: 'equipment', x: sx, y: sy, radius: 1000, status: 'running', docking_angle: 0 };
+            sendCommand('add_obstacle', { data: newOb });
+        } else {
+            const newId = `ob-${Date.now()}-${Math.random().toString(36).substr(2,5)}`;
+            const newOb = activeTool === 'BUILD_SQ' 
+              ? { id: newId, type: 'rectangle', x: sx, y: sy, width: 1000, height: 1000, angle: 0 }
+              : { id: newId, type: 'circle', x: sx, y: sy, radius: 500 };
+            sendCommand('add_obstacle', { data: newOb });
+        }
       }
     }
   };
 
   const handleCanvasDoubleClick = (x: number, y: number) => {
     if (!telemetry) return;
-    
-    // 核心修正：只有在建築模式下才允許雙擊刪除
-    if (activeTool !== 'BUILD_SQ' && activeTool !== 'BUILD_CIR') return;
+    if (activeTool !== 'BUILD_SQ' && activeTool !== 'BUILD_CIR' && activeTool !== 'BUILD_STAR') return;
 
     const clickedOb = telemetry.obstacles.find(ob => {
       if (ob.type === 'rectangle') return Math.abs(x - ob.x) <= 500 && Math.abs(y - ob.y) <= 500;
+      if (ob.type === 'equipment') return Math.sqrt((ob.x - x) ** 2 + (ob.y - y) ** 2) <= (ob.radius || 1000);
       return Math.sqrt((ob.x - x) ** 2 + (ob.y - y) ** 2) <= (ob.radius || 500);
     });
     if (clickedOb) {
@@ -81,9 +93,19 @@ function App() {
     }
   };
 
-  const updateObstacle = (id: string, field: string, value: number) => {
+  const updateObstacle = (id: string, field: string, value: any) => {
     const ob = telemetry?.obstacles.find(o => o.id === id);
-    if (ob) sendCommand('update_obstacle', { data: { ...ob, [field]: (field==='x'||field==='y') ? snapToCenter(value) : value } });
+    if (!ob) return;
+    
+    if (field === 'new_id') {
+        if (telemetry?.obstacles.some(o => o.id === value && o.id !== id)) {
+            alert("ID already exists!"); return;
+        }
+        sendCommand('update_obstacle', { data: { old_id: id, new_id: value } });
+        setSelectedObId(value);
+    } else {
+        sendCommand('update_obstacle', { data: { ...ob, [field]: (field==='x'||field==='y') ? snapToCenter(value) : value } });
+    }
   };
 
   return (
@@ -136,6 +158,59 @@ function App() {
           </button>
         </div>
 
+        {selectedObstacle && (
+          <div className="section" style={{ borderTop: '1px solid #30363d', paddingTop: '15px' }}>
+            <h3>Settings: {selectedObstacle.type === 'equipment' ? 'Equipment' : 'Object'}</h3>
+            <div className="item-card active">
+              <div className="telemetry-grid">
+                <div className="tele-item"><label>ID</label>
+                    <input type="text" value={editingId} 
+                        onChange={(e) => setEditingId(e.target.value)} 
+                        onBlur={() => editingId !== selectedObstacle.id && updateObstacle(selectedObstacle.id, 'new_id', editingId)}
+                        onKeyDown={(e) => e.key === 'Enter' && updateObstacle(selectedObstacle.id, 'new_id', editingId)}
+                    />
+                </div>
+                {selectedObstacle.type === 'equipment' && (
+                    <>
+                    <div className="tele-item"><label>STATUS</label>
+                        <select value={selectedObstacle.status || 'running'} onChange={(e) => updateObstacle(selectedObstacle.id, 'status', e.target.value)}>
+                            <option value="normal">NORMAL</option>
+                            <option value="running">RUNNING</option>
+                            <option value="error">ERROR</option>
+                        </select>
+                    </div>
+                    <div className="tele-item"><label>ANGLE</label>
+                        <input type="number" min="0" max="359" value={selectedObstacle.docking_angle || 0} 
+                            onChange={(e) => updateObstacle(selectedObstacle.id, 'docking_angle', parseInt(e.target.value)||0)} />
+                    </div>
+                    </>
+                )}
+                <div className="tele-item"><label>X</label>
+                  <input type="number" step="1000" value={Math.round(selectedObstacle.x)} onChange={(e) => updateObstacle(selectedObstacle.id, 'x', parseInt(e.target.value)||0)} />
+                </div>
+                <div className="tele-item"><label>Y</label>
+                  <input type="number" step="1000" value={Math.round(selectedObstacle.y)} onChange={(e) => updateObstacle(selectedObstacle.id, 'y', parseInt(e.target.value)||0)} />
+                </div>
+              </div>
+              <button className="danger" style={{ width: '100%', marginTop: '10px' }} 
+                onClick={() => { sendCommand('remove_obstacle', { id: selectedObstacle.id }); setSelectedObId(null); }}>DELETE</button>
+            </div>
+          </div>
+        )}
+
+        {selectedAgv && (
+          <div className="section" style={{ borderTop: '1px solid #30363d', paddingTop: '15px' }}>
+            <h3>AGV Limits: {selectedAgv.id}</h3>
+            <div style={{ marginTop: '5px' }}>
+              <label style={{ fontSize: '10px', color: '#8b949e' }}>DRIVE LIMIT: {selectedAgv.max_rpm} RPM</label>
+              <input type="range" min="0" max="3000" step="100" value={selectedAgv.max_rpm} 
+                onChange={(e) => sendCommand('set_speed', { agv_id: selectedAgvId, data: parseInt(e.target.value) })}
+                style={{ width: '100%', accentColor: '#58a6ff' }} />
+            </div>
+            <button className="danger" style={{ width: '100%', marginTop: '20px', opacity: 0.6 }} onClick={() => sendCommand('remove_agv', { agv_id: selectedAgvId })}>REMOVE AGV</button>
+          </div>
+        )}
+
         <div className="section">
           <h3>Global Cleanup</h3>
           <button className="danger" style={{ width: '100%' }} onClick={() => sendCommand('clear_obstacles')}>WIPE ALL OBSTACLES</button>
@@ -143,18 +218,27 @@ function App() {
       </div>
 
       <div className="main-viewport">
-        {/* 嵌入式頂部工具列 */}
         <div className="toolbar-container">
-          <button className={activeTool === 'SELECT' ? 'active' : ''} onClick={() => setActiveTool('SELECT')}>
-            🔍 SELECT
-          </button>
-          <button className={activeTool === 'BUILD_SQ' ? 'active' : ''} onClick={() => setActiveTool('BUILD_SQ')}>
-            🧱 SQUARE
-          </button>
-          <button className={activeTool === 'BUILD_CIR' ? 'active' : ''} onClick={() => setActiveTool('BUILD_CIR')}>
-            ⭕ CIRCLE
-          </button>
-          <span className="toolbar-hint">Right-click anywhere to set target</span>
+          <div className="toolbar-left">
+            <button className={activeTool === 'SELECT' ? 'active' : ''} onClick={() => setActiveTool('SELECT')}>🔍 SELECT</button>
+            <button className={activeTool === 'BUILD_STAR' ? 'active' : ''} onClick={() => setActiveTool('BUILD_STAR')}>⭐ EQUIPMENT</button>
+            <button className={activeTool === 'BUILD_SQ' ? 'active' : ''} onClick={() => setActiveTool('BUILD_SQ')}>🧱 SQUARE</button>
+            <button className={activeTool === 'BUILD_CIR' ? 'active' : ''} onClick={() => setActiveTool('BUILD_CIR')}>⭕ CIRCLE</button>
+          </div>
+          <div className="toolbar-center">
+            {selectedAgv && (
+              <div className="agv-quick-controls">
+                {!selectedAgv.is_running 
+                  ? <button className="primary" onClick={() => sendCommand('start', { agv_id: selectedAgvId })}>▶ START</button>
+                  : <button className="warning" onClick={() => sendCommand('pause', { agv_id: selectedAgvId })}>⏸ PAUSE</button>
+                }
+                <button className="danger" onClick={() => sendCommand('reset', { agv_id: selectedAgvId })}>🔄 RESET</button>
+              </div>
+            )}
+          </div>
+          <div className="toolbar-right">
+            <span className="toolbar-hint">Right-click to set target</span>
+          </div>
         </div>
 
         <div className="canvas-container">
@@ -168,24 +252,23 @@ function App() {
             onAgvSelect={(id) => { setSelectedAgvId(id); setSelectedObId(null); }}
             onCanvasRightClick={(x, y) => {
               const targetId = selectedAgvId || (telemetry?.agvs.length ? telemetry.agvs[0].id : null);
-              if (targetId) sendCommand('set_target', { agv_id: targetId, data: { x: snapToIntersection(x), y: snapToIntersection(y) } });
+              if (!targetId || !telemetry) return;
+              const clickedEq = telemetry.obstacles.find(ob => 
+                ob.type === 'equipment' && Math.sqrt((ob.x - x) ** 2 + (ob.y - y) ** 2) < (ob.radius || 1000)
+              );
+              const targetX = clickedEq ? clickedEq.x : snapToIntersection(x);
+              const targetY = clickedEq ? clickedEq.y : snapToIntersection(y);
+              sendCommand('set_target', { agv_id: targetId, data: { x: targetX, y: targetY } });
             }}
           />
         </div>
       </div>
 
       <div className="sidebar right-wing">
-        <h2>Inspector</h2>
+        <h2>Telemetry</h2>
         {selectedAgv ? (
           <div className="section">
-            <h3>AGV: {selectedAgv.id}</h3>
-            <div className="btn-group-grid">
-              {!selectedAgv.is_running 
-                ? <button className="primary" onClick={() => sendCommand('start', { agv_id: selectedAgvId })}>START MISSION</button>
-                : <button className="warning" onClick={() => sendCommand('pause', { agv_id: selectedAgvId })}>PAUSE</button>
-              }
-              <button className="danger" onClick={() => sendCommand('reset', { agv_id: selectedAgvId })}>RESET</button>
-            </div>
+            <h3>Status: {selectedAgv.id}</h3>
             <div className="telemetry-grid">
               <div className="tele-item"><label>POS X</label><span>{Math.round(selectedAgv.x)}mm</span></div>
               <div className="tele-item"><label>POS Y</label><span>{Math.round(selectedAgv.y)}mm</span></div>
@@ -194,38 +277,16 @@ function App() {
               <div className="tele-item"><label>L_RPM</label><span style={{color: 'var(--accent-blue)'}}>{Math.round(selectedAgv.l_rpm)}</span></div>
               <div className="tele-item"><label>R_RPM</label><span style={{color: 'var(--accent-green)'}}>{Math.round(selectedAgv.r_rpm)}</span></div>
             </div>
-            <div style={{ marginTop: '15px' }}>
-              <label style={{ fontSize: '10px', color: '#8b949e' }}>DRIVE LIMIT: {selectedAgv.max_rpm} RPM</label>
-              <input type="range" min="0" max="3000" step="100" value={selectedAgv.max_rpm} 
-                onChange={(e) => sendCommand('set_speed', { agv_id: selectedAgvId, data: parseInt(e.target.value) })}
-                style={{ width: '100%', accentColor: '#58a6ff' }} />
-            </div>
-            <button className="danger" style={{ width: '100%', marginTop: '20px', opacity: 0.6 }} onClick={() => sendCommand('remove_agv', { agv_id: selectedAgvId })}>REMOVE AGV</button>
-          </div>
-        ) : null}
-
-        {selectedObstacle ? (
-          <div className="section">
-            <h3>Object: {selectedObstacle.id.slice(0,8)}</h3>
-            <div className="item-card active">
-              <div className="telemetry-grid">
-                <div className="tele-item"><label>TYPE</label><span>{selectedObstacle.type.toUpperCase()}</span></div>
-                <div className="tele-item"><label>X</label>
-                  <input type="number" step="1000" value={Math.round(selectedObstacle.x)} onChange={(e) => updateObstacle(selectedObstacle.id, 'x', parseInt(e.target.value)||0)} />
+            <div className="item-card" style={{ marginTop: '20px', borderColor: 'rgba(57, 255, 20, 0.2)' }}>
+                <div style={{ fontSize: '11px', color: '#8b949e', marginBottom: '8px' }}>Active Target</div>
+                <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#39ff14' }}>
+                    X: {selectedAgv.target.x} Y: {selectedAgv.target.y}
                 </div>
-                <div className="tele-item"><label>Y</label>
-                  <input type="number" step="1000" value={Math.round(selectedObstacle.y)} onChange={(e) => updateObstacle(selectedObstacle.id, 'y', parseInt(e.target.value)||0)} />
-                </div>
-              </div>
-              <button className="danger" style={{ width: '100%', marginTop: '10px' }} 
-                onClick={() => { sendCommand('remove_obstacle', { id: selectedObstacle.id }); setSelectedObId(null); }}>DELETE OBJECT</button>
             </div>
           </div>
-        ) : null}
-
-        {!selectedAgv && !selectedObstacle && (
+        ) : (
           <div style={{ textAlign: 'center', padding: '40px 20px', color: '#8b949e', fontSize: '12px' }}>
-            Click an entity on map to inspect
+            Select an AGV to monitor real-time telemetry
           </div>
         )}
       </div>

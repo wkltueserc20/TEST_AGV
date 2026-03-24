@@ -1939,5 +1939,66 @@
     "x": 20500,
     "y": 29500,
     "radius": 500
+  },
+  {
+    "id": "EQP-6XIK",
+    "type": "equipment",
+    "x": 43500,
+    "y": 42500,
+    "radius": 1000,
+    "status": "running"
+  },
+  {
+    "id": "EQP-MM90",
+    "type": "equipment",
+    "x": 2500,
+    "y": 32500,
+    "radius": 1000,
+    "status": "running",
+    "docking_angle": 180
+  },
+  {
+    "id": "EQP-Z20Z",
+    "type": "equipment",
+    "x": 2500,
+    "y": 28500,
+    "radius": 1000,
+    "status": "running",
+    "docking_angle": 180
+  },
+  {
+    "id": "EQP-2DTH",
+    "type": "equipment",
+    "x": 2500,
+    "y": 250500,
+    "radius": 1000,
+    "status": "running"
+  },
+  {
+    "id": "EQP-JTY0",
+    "type": "equipment",
+    "x": 2500,
+    "y": 20500,
+    "radius": 1000,
+    "status": "running",
+    "docking_angle": 180
+  },
+  {
+    "id": "EQP-TF47",
+    "type": "equipment",
+    "x": 2500,
+    "y": 24500,
+    "radius": 1000,
+    "status": "running",
+    "docking_angle": 180
+  },
+  {
+    "id": "EQP-L952",
+    "type": "equipment",
+    "x": 21500,
+    "y": 43500,
+    "radius": 1000,
+    "status": "running",
+    "docking_angle": 90
   }
 ]

@@ -29,7 +29,15 @@ class AGVController:
             oid = ob.get("id", "unknown")
             if ignore_id and oid == ignore_id:
                 continue
-                
+            
+            # 智慧對接：如果是設備類型，檢查是否為當前目標或正在對接中
+            if ob['type'] == 'equipment':
+                # 設備半徑 1000 + AGV 半徑 500 = 1500mm 開始碰撞。
+                # 將放寬距離設為 2000mm，確保 AGV 在接觸邊緣前就能被放行進入對接。
+                dist_to_eq = math.sqrt((ob['x'] - x)**2 + (ob['y'] - y)**2)
+                if dist_to_eq < 2000:
+                    continue
+
             if ob['type'] == 'rectangle':
                 w, h = ob.get('width', 1000), ob.get('height', 1000)
                 ob_geom = box(-w/2, -h/2, w/2, h/2)
@@ -45,7 +53,7 @@ class AGVController:
                 return False, oid
         return True, None
 
-    def compute_command(self, x, y, theta, v_curr, omega_curr, target_wp, max_speed, obstacles, margin=525, dt=0.1, ignore_id: str = None, status: str = None) -> Tuple[float, float, Optional[str]]:
+    def compute_command(self, x, y, theta, v_curr, omega_curr, target_wp, max_speed, obstacles, margin=525, dt=0.1, ignore_id: str = None, status: str = None, force_forward: bool = False) -> Tuple[float, float, Optional[str]]:
         """
         計算控制指令，支援前進與倒車。
         """
@@ -57,9 +65,9 @@ class AGVController:
         # 計算相對於車頭的夾角
         alpha = math.atan2(math.sin(target_angle - theta), math.cos(target_angle - theta))
 
-        # 決定行駛方向：如果角度偏差 > 90度 (PI/2)，則使用倒車
+        # 決定行駛方向：如果角度偏差 > 90度 (PI/2)，且沒有強制前進，則使用倒車
         direction = 1.0
-        if abs(alpha) > math.pi / 2:
+        if not force_forward and abs(alpha) > math.pi / 2:
             direction = -1.0
             # 重新計算倒車夾角 (將目標轉向車尾)
             alpha = math.atan2(math.sin(target_angle - (theta + math.pi)), math.cos(target_angle - (theta + math.pi)))

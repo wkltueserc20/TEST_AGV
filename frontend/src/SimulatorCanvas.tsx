@@ -45,11 +45,9 @@ const SimulatorCanvas: React.FC<Props> = ({
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // 修復 Chrome Passive 滾輪警告
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
     const handleWheelNative = (e: WheelEvent) => {
       e.preventDefault();
       const zoomSpeed = 0.15;
@@ -59,7 +57,6 @@ const SimulatorCanvas: React.FC<Props> = ({
         zoom: Math.min(Math.max(prev.zoom + direction * zoomSpeed * prev.zoom, 0.2), 20.0) 
       }));
     };
-
     canvas.addEventListener('wheel', handleWheelNative, { passive: false });
     return () => canvas.removeEventListener('wheel', handleWheelNative);
   }, []);
@@ -114,10 +111,11 @@ const SimulatorCanvas: React.FC<Props> = ({
     if (!ctx) return;
 
     const now = performance.now();
-    const multiplier = (currentTelemetry as any).multiplier || 10;
     const { width: w, height: h } = dimensions;
     const vs = viewState;
+    const scale = (w / MAP_SIZE) * vs.zoom;
 
+    // --- 1. 更新 AGV 動畫狀態 ---
     currentTelemetry.agvs.forEach(a => {
       if (!displayStates.current[a.id]) {
         displayStates.current[a.id] = { x: a.x, y: a.y, theta: a.theta, lastUpdate: now };
@@ -125,13 +123,9 @@ const SimulatorCanvas: React.FC<Props> = ({
         const ds = displayStates.current[a.id];
         const dt = (now - ds.lastUpdate) / 1000.0;
         if (a.is_running) {
-          // 核心優化：移除 multiplier
-          // 後端已經快進了座標，前端只需做純粹的視覺平滑
           ds.x += a.v * Math.cos(ds.theta) * dt;
           ds.y += a.v * Math.sin(ds.theta) * dt;
           ds.theta += a.omega * dt;
-          
-          // 強力同步：快速修正到遙測座標
           ds.x += (a.x - ds.x) * 0.3;
           ds.y += (a.y - ds.y) * 0.3;
           let dTheta = a.theta - ds.theta;
@@ -143,16 +137,9 @@ const SimulatorCanvas: React.FC<Props> = ({
         }
         ds.lastUpdate = now;
       }
-      if (a.visited && a.visited.length > 0) {
-        const fingerprint = `${a.visited.length}-${a.visited[0][0]}`;
-        if (fingerprint !== lastSearchFingerprints.current[a.id]) {
-            revealedIndices.current[a.id] = 0;
-            lastSearchFingerprints.current[a.id] = fingerprint;
-        }
-        if (revealedIndices.current[a.id] < a.visited.length) revealedIndices.current[a.id] += 50;
-      }
     });
 
+    // --- 2. 背景繪製 ---
     ctx.fillStyle = '#0d0e12';
     ctx.fillRect(0, 0, w, h);
 
@@ -167,17 +154,22 @@ const SimulatorCanvas: React.FC<Props> = ({
       for (let y = 0; y <= MAP_SIZE; y += 5000) {
         const { cx, cy } = worldToCanvas(x, y, w, h, vs);
         if (cx >= 0 && cx <= w && cy >= 0 && cy <= h) {
-            ctx.beginPath(); 
-            ctx.arc(cx, cy, Math.max(0.1, 1.5 * vs.zoom), 0, Math.PI * 2); 
-            ctx.fill();
+            ctx.beginPath(); ctx.arc(cx, cy, Math.max(0.1, 1.5 * vs.zoom), 0, Math.PI * 2); ctx.fill();
         }
       }
     }
 
-    const scale = (w / MAP_SIZE) * vs.zoom;
-
+    // --- 2.5 繪製 Search Debug Layer (A* 搜尋軌跡) ---
     const selectedAgv = currentTelemetry.agvs.find(a => a.id === currentSelectedAgvId);
     if (showSearch && selectedAgv?.visited) {
+        const fingerprint = `${selectedAgv.visited.length}-${selectedAgv.visited[0] ? selectedAgv.visited[0][0] : 0}`;
+        if (fingerprint !== lastSearchFingerprints.current[selectedAgv.id]) {
+            revealedIndices.current[selectedAgv.id] = 0;
+            lastSearchFingerprints.current[selectedAgv.id] = fingerprint;
+        }
+        if (revealedIndices.current[selectedAgv.id] < selectedAgv.visited.length) {
+            revealedIndices.current[selectedAgv.id] += 100;
+        }
         ctx.fillStyle = 'rgba(0, 255, 255, 0.08)';
         const blockSize = GRID_SIZE * scale;
         const count = revealedIndices.current[selectedAgv.id] || 0;
@@ -188,62 +180,12 @@ const SimulatorCanvas: React.FC<Props> = ({
         }
     }
 
-    if (selectedAgv?.path) {
-      ctx.setLineDash([5, 5]);
-      ctx.strokeStyle = '#ff4d4d';
-      ctx.lineWidth = 2;
-      ctx.shadowBlur = 10; ctx.shadowColor = '#ff4d4d';
-      ctx.beginPath();
-      selectedAgv.path.forEach((p, i) => {
-        const cp = worldToCanvas(p[0], p[1], w, h, vs);
-        if (i === 0) ctx.moveTo(cp.cx, cp.cy); else ctx.lineTo(cp.cx, cp.cy);
-      });
-      ctx.stroke();
-      ctx.setLineDash([]); ctx.shadowBlur = 0;
-    }
-
-    currentTelemetry.obstacles.forEach(ob => {
-      const { cx, cy } = worldToCanvas(ob.x, ob.y, w, h, vs);
-      const isSelected = currentSelectedObId === ob.id;
-      ctx.save();
-      ctx.translate(cx, cy);
-      if (ob.type === 'circle') {
-          const r = Math.max(0.1, (ob.radius || 500) * scale);
-          ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37';
-          ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
-          ctx.restore();
-          ctx.save(); ctx.translate(cx, cy);
-          ctx.strokeStyle = isSelected ? '#fff' : '#ffd700';
-          ctx.lineWidth = 1.5 * vs.zoom;
-          ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
-      } else {
-          ctx.rotate(-ob.angle);
-          const ow = ob.width * scale, oh = ob.height * scale;
-          ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37';
-          ctx.fillRect(-ow/2, -oh/2, ow, oh);
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-          ctx.beginPath();
-          for (let i = -ow; i < ow + oh; i += 10*vs.zoom) { ctx.moveTo(i, -oh/2); ctx.lineTo(i - oh, oh/2); }
-          ctx.clip(); ctx.stroke();
-          ctx.restore();
-          ctx.save(); ctx.translate(cx, cy); ctx.rotate(-ob.angle);
-          ctx.strokeStyle = isSelected ? '#fff' : '#ffd700';
-          ctx.lineWidth = 1.5 * vs.zoom;
-          if (isSelected) { ctx.shadowBlur = 15; ctx.shadowColor = '#ff6600'; }
-          ctx.strokeRect(-ow/2, -oh/2, ow, oh);
-      }
-      ctx.restore();
-    });
-
+    // --- 3. 目標與路徑繪製 ---
     currentTelemetry.agvs.forEach(a => {
       const isSelected = a.id === currentSelectedAgvId;
       const { cx, cy } = worldToCanvas(a.target.x, a.target.y, w, h, vs);
-      if (a.status === 'YIELDING' || a.status === 'RELOCATING') {
-          ctx.save(); ctx.translate(cx, cy);
-          ctx.strokeStyle = '#bb86fc'; ctx.lineWidth = 2 * vs.zoom;
-          ctx.beginPath(); ctx.moveTo(-10, -10); ctx.lineTo(10, 10); ctx.moveTo(10, -10); ctx.lineTo(-10, 10); ctx.stroke();
-          ctx.restore();
-      }
+      
+      // 繪製目標點
       ctx.save(); ctx.translate(cx, cy);
       const pulse = Math.max(0.1, (1 + Math.sin(now / 200) * 0.15) * vs.zoom);
       ctx.strokeStyle = isSelected ? '#39ff14' : '#1b5e20';
@@ -251,13 +193,29 @@ const SimulatorCanvas: React.FC<Props> = ({
       ctx.beginPath(); ctx.arc(0, 0, 12 * pulse, 0, Math.PI * 2); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(-15*vs.zoom, 0); ctx.lineTo(15*vs.zoom, 0); ctx.moveTo(0, -15*vs.zoom); ctx.lineTo(0, 15*vs.zoom); ctx.stroke();
       ctx.restore();
+
+      // 繪製路徑
+      if (isSelected && a.path) {
+        ctx.save();
+        ctx.setLineDash([5, 5]);
+        ctx.strokeStyle = '#ff4d4d';
+        ctx.lineWidth = 2 * vs.zoom;
+        ctx.shadowBlur = 10; ctx.shadowColor = '#ff4d4d';
+        ctx.beginPath();
+        a.path.forEach((p, i) => {
+          const cp = worldToCanvas(p[0], p[1], w, h, vs);
+          if (i === 0) ctx.moveTo(cp.cx, cp.cy); else ctx.lineTo(cp.cx, cp.cy);
+        });
+        ctx.stroke();
+        ctx.restore();
+      }
     });
 
-    // 繪製路徑預演 (Repulsion Zones / 排斥力場)
+    // --- 3.5 繪製路徑預演 (Path Occupancy / Repulsion Zones) ---
     if (currentTelemetry.path_occupancy) {
         ctx.save();
         Object.entries(currentTelemetry.path_occupancy).forEach(([id, points]) => {
-            ctx.fillStyle = 'rgba(255, 77, 77, 0.1)';
+            ctx.fillStyle = 'rgba(255, 77, 77, 0.08)';
             points.forEach(p => {
                 const cp = worldToCanvas(p[0], p[1], w, h, vs);
                 ctx.beginPath();
@@ -268,29 +226,7 @@ const SimulatorCanvas: React.FC<Props> = ({
         ctx.restore();
     }
 
-    // 繪製避難點 (Haven Markers)
-    if (currentTelemetry.reserved_havens) {
-        ctx.save();
-        Object.values(currentTelemetry.reserved_havens).forEach(([hx, hy]) => {
-            const cp = worldToCanvas(hx, hy, w, h, vs);
-            ctx.strokeStyle = '#bb86fc';
-            ctx.setLineDash([5, 5]);
-            ctx.lineWidth = 2 * vs.zoom;
-            ctx.beginPath();
-            ctx.arc(cp.cx, cp.cy, 1000 * scale, 0, Math.PI * 2);
-            ctx.stroke();
-            
-            // 繪製一個紫色的小 X
-            const sz = 10 * vs.zoom;
-            ctx.beginPath();
-            ctx.moveTo(cp.cx - sz, cp.cy - sz); ctx.lineTo(cp.cx + sz, cp.cy + sz);
-            ctx.moveTo(cp.cx + sz, cp.cy - sz); ctx.lineTo(cp.cx - sz, cp.cy + sz);
-            ctx.stroke();
-        });
-        ctx.restore();
-    }
-
-    // 繪製社交連結 (關係線)
+    // --- 3.6 繪製社交連結 (Yielding / Waiting Lines) ---
     if (currentTelemetry.social_links) {
         currentTelemetry.social_links.forEach(link => {
             const fromAgv = currentTelemetry.agvs.find(a => a.id === link.from);
@@ -300,30 +236,47 @@ const SimulatorCanvas: React.FC<Props> = ({
                 const p2 = worldToCanvas(toAgv.x, toAgv.y, w, h, vs);
                 ctx.save();
                 ctx.setLineDash([5, 5]);
-                // WAITING 用橘色，YIELDING 用紫色
                 const color = link.type === 'WAITING' ? 'rgba(255, 152, 0, 0.6)' : 'rgba(187, 134, 252, 0.6)';
                 ctx.strokeStyle = color;
                 ctx.lineWidth = 2 * vs.zoom;
-                ctx.beginPath();
-                ctx.moveTo(p1.cx, p1.cy);
-                ctx.lineTo(p2.cx, p2.cy);
-                ctx.stroke();
-                
-                // 繪製小箭頭指向阻塞者
+                ctx.beginPath(); ctx.moveTo(p1.cx, p1.cy); ctx.lineTo(p2.cx, p2.cy); ctx.stroke();
                 const angle = Math.atan2(p2.cy - p1.cy, p2.cx - p1.cx);
                 ctx.translate(p2.cx - Math.cos(angle) * 30 * vs.zoom, p2.cy - Math.sin(angle) * 30 * vs.zoom);
                 ctx.rotate(angle);
                 ctx.fillStyle = color;
-                ctx.beginPath();
-                ctx.moveTo(0, 0);
-                ctx.lineTo(-10 * vs.zoom, -5 * vs.zoom);
-                ctx.lineTo(-10 * vs.zoom, 5 * vs.zoom);
-                ctx.fill();
+                ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-10 * vs.zoom, -5 * vs.zoom); ctx.lineTo(-10 * vs.zoom, 5 * vs.zoom); ctx.fill();
                 ctx.restore();
             }
         });
     }
 
+    // --- 4. 靜態障礙物繪製 ---
+    currentTelemetry.obstacles.filter(ob => ob.type !== 'equipment').forEach(ob => {
+      const { cx, cy } = worldToCanvas(ob.x, ob.y, w, h, vs);
+      const isSelected = currentSelectedObId === ob.id;
+      ctx.save(); ctx.translate(cx, cy);
+      if (ob.type === 'circle') {
+          const r = Math.max(0.1, (ob.radius || 500) * scale);
+          ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37';
+          ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+          ctx.restore(); ctx.save(); ctx.translate(cx, cy);
+          ctx.strokeStyle = isSelected ? '#fff' : '#ffd700';
+          ctx.lineWidth = 1.5 * vs.zoom;
+          ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
+      } else {
+          ctx.rotate(-ob.angle);
+          const ow = ob.width * scale, oh = ob.height * scale;
+          ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37';
+          ctx.fillRect(-ow/2, -oh/2, ow, oh);
+          ctx.restore(); ctx.save(); ctx.translate(cx, cy); ctx.rotate(-ob.angle);
+          ctx.strokeStyle = isSelected ? '#fff' : '#ffd700';
+          ctx.lineWidth = 1.5 * vs.zoom;
+          ctx.strokeRect(-ow/2, -oh/2, ow, oh);
+      }
+      ctx.restore();
+    });
+
+    // --- 5. AGV 本體繪製 ---
     currentTelemetry.agvs.forEach(a => {
       const ds = displayStates.current[a.id];
       if (!ds) return;
@@ -331,44 +284,61 @@ const SimulatorCanvas: React.FC<Props> = ({
       const isSelected = a.id === currentSelectedAgvId;
       const sz = 1000 * scale;
       ctx.save(); ctx.translate(cx, cy); ctx.rotate(-ds.theta);
-      if (isSelected || a.status === 'EVADING' || a.status === 'STUCK') {
-          let beamColor = 'rgba(0, 242, 255, 0.15)';
-          if (a.status === 'EVADING') beamColor = 'rgba(187, 134, 252, 0.2)';
-          if (a.status === 'PLANNING') beamColor = 'rgba(255, 193, 7, 0.15)';
-          const gradientRadius = Math.max(0.1, sz * 1.5);
-          const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, gradientRadius);
-          gradient.addColorStop(0, beamColor); gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
-          ctx.fillStyle = gradient; ctx.beginPath(); ctx.moveTo(0, 0);
-          ctx.arc(0, 0, gradientRadius, -Math.PI/6, Math.PI/6); ctx.fill();
-      }
-      let strokeColor = isSelected ? '#00f2ff' : (a.status === 'EVADING' ? '#bb86fc' : (a.status === 'STUCK' ? '#ff4d4d' : '#555'));
+      let strokeColor = isSelected ? '#00f2ff' : '#555';
       ctx.fillStyle = '#1a1a1a'; ctx.strokeStyle = strokeColor; ctx.lineWidth = 2 * vs.zoom;
-      if (isSelected) { ctx.shadowBlur = 15; ctx.shadowColor = strokeColor; }
       const r = Math.max(0.1, 10 * scale);
       ctx.beginPath(); ctx.moveTo(-sz/2 + r, -sz/2); ctx.lineTo(sz/2 - r, -sz/2);
       ctx.quadraticCurveTo(sz/2, -sz/2, sz/2, -sz/2 + r); ctx.lineTo(sz/2, sz/2 - r);
       ctx.quadraticCurveTo(sz/2, sz/2, sz/2 - r, sz/2); ctx.lineTo(-sz/2 + r, sz/2);
       ctx.quadraticCurveTo(-sz/2, sz/2, -sz/2, sz/2 - r); ctx.lineTo(-sz/2, -sz/2 + r);
       ctx.quadraticCurveTo(-sz/2, -sz/2, -sz/2 + r, -sz/2); ctx.fill(); ctx.stroke();
-      ctx.fillStyle = '#000'; ctx.fillRect(-sz/4, -sz/2 - 3*vs.zoom, sz/2, 6*vs.zoom); ctx.fillRect(-sz/4, sz/2 - 3*vs.zoom, sz/2, 6*vs.zoom);
       ctx.beginPath(); ctx.arc(0, 0, Math.max(0.1, sz/4), 0, Math.PI * 2); ctx.fillStyle = '#333'; ctx.fill();
-      ctx.strokeStyle = isSelected ? '#00f2ff' : '#444'; ctx.stroke();
-      const scanAngle = (now / 400) % (Math.PI * 2);
-      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(scanAngle)*sz/4, Math.sin(scanAngle)*sz/4);
-      ctx.strokeStyle = isSelected ? '#00f2ff' : '#555'; ctx.lineWidth = 1.5 * vs.zoom; ctx.stroke();
       ctx.fillStyle = isSelected ? '#00f2ff' : '#aaa';
       ctx.beginPath(); ctx.moveTo(sz/2 - 5*vs.zoom, 0); ctx.lineTo(sz/2 - 15*vs.zoom, -10*vs.zoom); ctx.lineTo(sz/2 - 15*vs.zoom, 10*vs.zoom); ctx.fill();
-      const ledColor = a.is_running ? '#00ff00' : (a.is_planning ? '#ffc107' : '#ff3333');
-      ctx.beginPath(); ctx.arc(-sz/2 + 15*vs.zoom, -sz/2 + 15*vs.zoom, Math.max(0.1, 4*vs.zoom), 0, Math.PI * 2);
-      ctx.fillStyle = ledColor; ctx.shadowBlur = 8; ctx.shadowColor = ledColor; ctx.fill();
       ctx.restore();
-      ctx.shadowBlur = 0;
       ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(8, 11 * vs.zoom)}px monospace`;
       ctx.fillText(a.id, cx - 20, cy - sz * 0.7);
     });
 
+    // --- 6. 設備 (星星) 在最上層 ---
+    const drawStar = (ctx: CanvasRenderingContext2D, cx: number, cy: number, spikes: number, outerRadius: number, innerRadius: number) => {
+      let rot = Math.PI / 2 * 3;
+      let step = Math.PI / spikes;
+      ctx.beginPath(); ctx.moveTo(cx, cy - outerRadius)
+      for (let i = 0; i < spikes; i++) {
+        ctx.lineTo(cx + Math.cos(rot) * outerRadius, cy + Math.sin(rot) * outerRadius); rot += step;
+        ctx.lineTo(cx + Math.cos(rot) * innerRadius, cy + Math.sin(rot) * innerRadius); rot += step;
+      }
+      ctx.lineTo(cx, cy - outerRadius); ctx.closePath();
+    };
+
+    currentTelemetry.obstacles.filter(ob => ob.type === 'equipment').forEach(ob => {
+      const { cx, cy } = worldToCanvas(ob.x, ob.y, w, h, vs);
+      const isSelected = currentSelectedObId === ob.id;
+      const size = (ob.radius || 1000) * scale;
+      const colors: Record<string, string> = { 'normal': '#ffd700', 'running': '#39ff14', 'error': '#ff4d4d' };
+      const baseColor = colors[ob.status || 'running'] || '#39ff14';
+      ctx.save(); ctx.translate(cx, cy);
+      ctx.globalAlpha = 0.7; ctx.fillStyle = isSelected ? '#ff6600' : baseColor;
+      drawStar(ctx, 0, 0, 5, size, size * 0.45); ctx.fill();
+      ctx.globalAlpha = 1.0; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5 * vs.zoom;
+      ctx.stroke();
+      if (ob.docking_angle !== undefined) {
+          const angleRad = (ob.docking_angle * Math.PI) / 180;
+          // 指向入口：旋轉角度加 PI
+          ctx.rotate(-angleRad + Math.PI); ctx.strokeStyle = '#00f2ff'; ctx.lineWidth = 2 * vs.zoom;
+          ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(size * 0.8, 0);
+          ctx.lineTo(size * 0.6, -size * 0.1); ctx.moveTo(size * 0.8, 0);
+          ctx.lineTo(size * 0.6, size * 0.1); ctx.stroke();
+      }
+
+      ctx.restore();
+      ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(10, 12 * vs.zoom)}px monospace`;
+      ctx.textAlign = 'center'; ctx.fillText(ob.id, cx, cy - size - 10 * vs.zoom);
+    });
+
     animationFrameId.current = requestAnimationFrame(render);
-  }, [worldToCanvas, showSearch, dimensions, viewState]);
+  }, [worldToCanvas, dimensions, viewState, showSearch]);
 
   useEffect(() => {
     animationFrameId.current = requestAnimationFrame(render);
@@ -386,25 +356,23 @@ const SimulatorCanvas: React.FC<Props> = ({
     <div ref={containerRef} style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
       <canvas ref={canvasRef} width={dimensions.width} height={dimensions.height} 
         style={{ border: '2px solid #333', background: '#0d0e12', cursor: isDragging.current ? 'grabbing' : 'crosshair' }} 
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
         onClick={(e) => {
             if (e.altKey) return;
             const canvas = canvasRef.current; if (!canvas) return;
             const rect = canvas.getBoundingClientRect();
             const { x, y } = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top, dimensions.width, dimensions.height, viewState);
             const currentTelemetry = telemetryRef.current;
-            const clickedAgv = currentTelemetry?.agvs.find(a => Math.sqrt((a.x-x)**2+(a.y-y)**2) < 1500);
-            if (clickedAgv) onAgvSelect(clickedAgv.id);
-            else onCanvasClick(x, y);
+            const clickedEq = currentTelemetry?.obstacles.find(ob => ob.type === 'equipment' && Math.sqrt((ob.x-x)**2+(ob.y-y)**2) < 1500);
+            if (clickedEq) onCanvasClick(x, y);
+            else {
+                const clickedAgv = currentTelemetry?.agvs.find(a => Math.sqrt((a.x-x)**2+(a.y-y)**2) < 1500);
+                if (clickedAgv) onAgvSelect(clickedAgv.id);
+                else onCanvasClick(x, y);
+            }
         }} 
         onDoubleClick={(e) => handleInteraction(e, onCanvasDoubleClick)}
-        onContextMenu={(e) => {
-            e.preventDefault();
-            handleInteraction(e, onCanvasRightClick);
-        }} 
+        onContextMenu={(e) => { e.preventDefault(); handleInteraction(e, onCanvasRightClick); }} 
       />
       <button style={{ position: 'absolute', bottom: '20px', right: '20px', opacity: 0.6 }} onClick={() => setViewState({ zoom: 1, offsetX: 0, offsetY: 0 })}>
         RESET VIEW
