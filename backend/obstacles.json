@@ -1949,7 +1949,7 @@
     "radius": 1000,
     "status": "running",
     "docking_angle": 180,
-    "has_goods": false
+    "has_goods": true
   },
   {
     "id": "EQP-Z20Z",
@@ -2018,7 +2018,7 @@
     "radius": 1000,
     "status": "running",
     "docking_angle": 270,
-    "has_goods": false
+    "has_goods": true
   },
   {
     "id": "EQP-F5BW",
@@ -2028,7 +2028,7 @@
     "radius": 1000,
     "status": "running",
     "docking_angle": 0,
-    "has_goods": true
+    "has_goods": false
   },
   {
     "id": "EQP-6NUZ",

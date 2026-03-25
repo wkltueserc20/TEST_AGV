@@ -1,0 +1,5 @@
+schema_version: 1.0.0
+type: change
+name: priority-traffic-control
+status: proposed
+description: "新增多機交管規則，實作基於優先級與ID的衝突避讓與任務恢復機制，並新增除錯狀態顯示。"

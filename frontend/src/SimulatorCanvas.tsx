@@ -325,7 +325,19 @@ const SimulatorCanvas: React.FC<Props> = ({
       }
       ctx.restore();
       ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(8, 11 * vs.zoom)}px monospace`;
-      ctx.fillText(a.id, cx - 20, cy - sz * 0.7);
+      ctx.textAlign = 'center';
+      ctx.fillText(a.id, cx, cy - sz * 0.75);
+      
+      // 繪製狀態文字與 Emoji
+      const statusEmojis: Record<string, string> = {
+        'IDLE': '💤', 'PLANNING': '🔄', 'EXECUTING': '🚚', 'EVADING': '🛡️', 
+        'STUCK': '⚠️', 'LOADING': '📥', 'UNLOADING': '📤',
+        'WAITING': '⏸️', 'THINKING': '🧠', 'YIELDING': '🛡️'
+      };
+      const emoji = statusEmojis[a.status] || '❓';
+      ctx.fillStyle = a.status === 'STUCK' ? '#ff3333' : '#aaa';
+      ctx.font = `${Math.max(7, 9 * vs.zoom)}px monospace`;
+      ctx.fillText(`${emoji} ${a.status}`, cx, cy + sz * 0.75);
     });
 
     currentTelemetry.obstacles.filter(ob => ob.type === 'equipment').forEach(ob => {

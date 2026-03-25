@@ -118,6 +118,12 @@ def process_commands():
                     elif t == "reset":
                         a.x, a.y, a.theta = 5000.0, 5000.0, 0.0
                         a.v, a.omega = 0.0, 0.0; a.is_running = False; a.global_path = []
+                    elif t == "force_idle":
+                        # 強制設為 IDLE，清空任務與路徑，但不改變當前位置
+                        a.v, a.omega = 0.0, 0.0
+                        a.status = "IDLE"; a.is_running = False
+                        a.current_task = None; a.global_path = []; a.yielding_to_id = None
+                        a.original_target = None; a.replan_needed = False
                     elif t == "set_target": a.target = msg.get("data"); a.replan_needed = True
                     elif t == "set_speed": a.max_rpm = float(msg.get("data", 3000))
                 

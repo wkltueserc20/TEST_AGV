@@ -270,8 +270,13 @@ function App() {
                     {a.status}
                   </span>
                 </div>
+                <div style={{ marginTop: '8px', display: 'flex', gap: '5px' }}>
+                  <button style={{ flex: 1, fontSize: '9px', padding: '4px 2px', background: '#30363d', color: '#c9d1d9', border: '1px solid #444' }} onClick={(e) => { e.stopPropagation(); sendCommand('force_idle', { target_id: a.id }); }}>FORCE IDLE</button>
+                  <button style={{ flex: 1, fontSize: '9px', padding: '4px 2px', background: '#30363d', color: '#c9d1d9', border: '1px solid #444' }} onClick={(e) => { e.stopPropagation(); sendCommand(a.is_running ? 'pause' : 'start', { target_id: a.id }); }}>{a.is_running ? 'PAUSE' : 'START'}</button>
+                </div>
               </div>
             ))}
+
           </div>
           <button className={`primary ${addAgvMode ? 'warning' : ''}`} style={{ width: '100%', marginTop: '10px' }} onClick={() => setAddAgvMode(!addAgvMode)}>
             {addAgvMode ? 'CANCEL' : '+ DEPLOY NEW AGV'}

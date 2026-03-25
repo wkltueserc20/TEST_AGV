@@ -19,6 +19,9 @@ class AGVStatus(str, Enum):
     STUCK = "STUCK"
     LOADING = "LOADING"     
     UNLOADING = "UNLOADING" 
+    WAITING = "WAITING"
+    THINKING = "THINKING"
+    YIELDING = "YIELDING"
 
 class AGVMode(str, Enum):
     SIMULATION = "SIMULATION"
@@ -59,6 +62,10 @@ class AGV:
         self.current_task: Optional[Dict[str, Any]] = None
         self.task_timer = 0.0
         self._last_closest_idx = 0
+        
+        # Traffic Control 擴充
+        self.original_target: Optional[Dict[str, float]] = None
+        self.yielding_to_id: Optional[str] = None
 
         if state_dict:
             self.x = state_dict.get("x", self.x); self.y = state_dict.get("y", self.y)
@@ -66,11 +73,19 @@ class AGV:
             self.target = state_dict.get("target", self.target)
             self.mode = AGVMode(state_dict.get("mode", self.mode))
             self.max_rpm = state_dict.get("max_rpm", self.max_rpm)
-            self.status = AGVStatus(state_dict.get("status", self.status))
             self.has_goods = state_dict.get("has_goods", False)
             self.current_task = state_dict.get("current_task")
-            self.is_running = state_dict.get("is_running", False)
-            self.replan_needed = True if self.target != {"x": self.x, "y": self.y} else False
+            # 修正 1：重啟程式時，強制回歸 IDLE，並將目標設為當前位置，防止非同步規劃誤啟動
+            self.status = AGVStatus.IDLE
+            self.is_running = False 
+            self.target = {"x": self.x, "y": self.y}
+            self.replan_needed = False
+
+    def get_priority(self) -> int:
+        # 數字越小優先級越高。沒任務為 100，有任務預設為 5。
+        if not self.current_task:
+            return 100
+        return self.current_task.get("priority", 5)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -83,54 +98,111 @@ class AGV:
             "evasion_target": self.evasion_target, "current_task": self.current_task
         }
 
-    def _async_replan(self, obstacles, static_costmap, world=None, original_status=None, is_evasion_search=False):
+    def _async_replan(self, obstacles, static_costmap, world=None, original_status=None, is_evasion_search=False, yielding_to_id=None):
         self.is_planning = True
         try:
             if is_evasion_search:
-                all_threat_paths = [p for oid, p in world.path_occupancy.items() if oid != self.id]
+                # 獲取威脅路徑 (特別是對方的高優先級路徑)
+                all_threat_paths = []
+                if yielding_to_id and yielding_to_id in world.path_occupancy:
+                    all_threat_paths.append(world.path_occupancy[yielding_to_id])
+                else:
+                    all_threat_paths = [p for oid, p in world.path_occupancy.items() if oid != self.id]
+                
                 safe_spot = self.planner.find_nearest_safe_spot((self.x, self.y), static_costmap, all_threat_paths)
                 if safe_spot:
+                    # 進入避讓模式，記錄原始目標
+                    if self.status not in [AGVStatus.YIELDING, AGVStatus.EVADING]:
+                        self.original_target = {"x": self.target["x"], "y": self.target["y"]}
+                    
                     self.evasion_target = {"x": safe_spot[0], "y": safe_spot[1]}
                     self.target = self.evasion_target
+                    self.yielding_to_id = yielding_to_id
+                    
                     path, visited = self.planner.get_path([self.x, self.y], [self.target["x"], self.target["y"]], obstacles, static_costmap=static_costmap, world=world)
-                    self.global_path = path; self._last_closest_idx = 0; self.is_running = True; self.status = AGVStatus.EVADING
-                else: self.status = AGVStatus.STUCK
+                    self.global_path = path; self._last_closest_idx = 0; self.is_running = True
+                    self.status = AGVStatus.YIELDING
+                else:
+                    self.status = AGVStatus.STUCK
                 return
+
             path, visited = self.planner.get_path([self.x, self.y], [self.target["x"], self.target["y"]], obstacles, static_costmap=static_costmap, world=world)
             if not path: self.global_path = []; self._last_closest_idx = 0; return
             self.global_path = path; self._last_closest_idx = 0; self.visited_nodes = visited
-            if self.status != AGVStatus.EVADING:
-                self.status = AGVStatus.EXECUTING if self.is_running else AGVStatus.IDLE
+            
+            # 安全更新狀態：避免蓋掉裝卸料、避讓或等待狀態
+            if self.status in [AGVStatus.PLANNING, AGVStatus.EXECUTING, AGVStatus.IDLE]:
+                # 如果有目標要移動，就設為 EXECUTING，否則設為 IDLE
+                self.status = AGVStatus.EXECUTING if (self.is_running or self.target != {"x": self.x, "y": self.y}) else AGVStatus.IDLE
+            elif self.status in [AGVStatus.YIELDING, AGVStatus.WAITING]:
+                # 避讓路徑規劃完畢，繼續執行避讓任務，確保 is_running 為 True
+                self.is_running = True
         finally:
             self.is_planning = False; self.replan_needed = False
 
     def update(self, dt: float, world):
-        # 1. 裝卸料計時處理
-        if self.status in [AGVStatus.LOADING, AGVStatus.UNLOADING]:
+        # 1. 狀態速度鎖定：裝卸料、等待中、思考中或受困時，強制禁止移動並立即回傳
+        if self.status in [AGVStatus.LOADING, AGVStatus.UNLOADING, AGVStatus.WAITING, AGVStatus.THINKING, AGVStatus.STUCK]:
             self.v = 0; self.omega = 0; self.target_v = 0; self.target_omega = 0
-            self.task_timer -= dt
-            if self.task_timer <= 0:
-                if self.status == AGVStatus.LOADING:
-                    self.has_goods = True
-                    if self.current_task:
-                        source = next((o for o in world.obstacles if o["id"] == self.current_task["source_id"]), None)
-                        if source: source["has_goods"] = False; world.save_obstacles()
-                        tid = self.current_task.get("target_id")
-                        if tid:
-                            target_ob = next((o for o in world.obstacles if o["id"] == tid), None)
-                            if target_ob:
-                                self.target = {"x": target_ob["x"], "y": target_ob["y"]}
-                                self.status = AGVStatus.EXECUTING; self.is_running = True; self.replan_needed = True
+            self.l_rpm, self.r_rpm = 0, 0
+            
+            # --- Traffic Control: WAITING 狀態下的任務恢復偵測 ---
+            if self.status == AGVStatus.WAITING:
+                # 修正：如果完全沒有任務，則不應待在 WAITING，直接轉為 IDLE
+                if not self.current_task:
+                    logger.info(f"AGV {self.id} has no task. Resetting from WAITING to IDLE.")
+                    self.status = AGVStatus.IDLE
+                    self.is_running = False
+                    self.yielding_to_id = None
+                    self.original_target = None
+                    return
+
+                if self.yielding_to_id:
+                    # 強制至少等待 15 秒再重新規劃，避免震盪
+                    if self.wait_start_time and (time.time() - self.wait_start_time > 15.0):
+                        if self.original_target:
+                            other_path = world.path_occupancy.get(self.yielding_to_id, [])
+                            conflict_cleared = True
+                            if other_path:
+                                for ox, oy in other_path[:100]:
+                                    if (ox - self.x)**2 + (oy - self.y)**2 < 6250000: # 2.5m
+                                        conflict_cleared = False; break
+                            
+                            if conflict_cleared:
+                                logger.info(f"AGV {self.id} conflict with {self.yielding_to_id} cleared. Resuming task.")
+                                self.target = self.original_target
+                                self.original_target = None
+                                self.yielding_to_id = None
+                                self.is_running = True
+                                self.replan_needed = True
+                                self.status = AGVStatus.PLANNING
+                                return # 立即回傳，讓下一幀啟動規劃
+
+            # 裝卸料計時處理
+            if self.status in [AGVStatus.LOADING, AGVStatus.UNLOADING]:
+                self.task_timer -= dt
+                if self.task_timer <= 0:
+                    if self.status == AGVStatus.LOADING:
+                        self.has_goods = True
+                        if self.current_task:
+                            source = next((o for o in world.obstacles if o["id"] == self.current_task["source_id"]), None)
+                            if source: source["has_goods"] = False; world.save_obstacles()
+                            tid = self.current_task.get("target_id")
+                            if tid:
+                                target_ob = next((o for o in world.obstacles if o["id"] == tid), None)
+                                if target_ob:
+                                    self.target = {"x": target_ob["x"], "y": target_ob["y"]}
+                                    self.status = AGVStatus.EXECUTING; self.is_running = True; self.replan_needed = True
+                                else: world.complete_task(self.current_task["source_id"], None); self.status = AGVStatus.IDLE; self.is_running = False; self.current_task = None
                             else: world.complete_task(self.current_task["source_id"], None); self.status = AGVStatus.IDLE; self.is_running = False; self.current_task = None
-                        else: world.complete_task(self.current_task["source_id"], None); self.status = AGVStatus.IDLE; self.is_running = False; self.current_task = None
-                else:
-                    self.has_goods = False
-                    if self.current_task:
-                        target_ob = next((o for o in world.obstacles if o["id"] == self.current_task["target_id"]), None)
-                        if target_ob: target_ob["has_goods"] = True; world.save_obstacles()
-                        world.complete_task(self.current_task.get("source_id"), self.current_task["target_id"])
-                    self.status = AGVStatus.IDLE; self.is_running = False; self.current_task = None
-            self.l_rpm, self.r_rpm = 0, 0; return
+                    else:
+                        self.has_goods = False
+                        if self.current_task:
+                            target_ob = next((o for o in world.obstacles if o["id"] == self.current_task["target_id"]), None)
+                            if target_ob: target_ob["has_goods"] = True; world.save_obstacles()
+                            world.complete_task(self.current_task.get("source_id"), self.current_task["target_id"])
+                        self.status = AGVStatus.IDLE; self.is_running = False; self.current_task = None
+            return
 
         # 2. 路徑規劃與避讓檢查
         if self.replan_needed and not self.is_planning:
@@ -140,9 +212,8 @@ class AGV:
         self._last_compute_time += dt
         # 定期檢查避讓
         if self._last_compute_time >= 0.05:
-            if self.status != AGVStatus.LOADING and self.status != AGVStatus.UNLOADING:
-                self.check_proactive_evasion(world)
-
+            # 移除 status 限制，允許裝卸料時也能偵測並執行避讓
+            self.check_proactive_evasion(world)
         # --- 效能優化：單次 O(1) 路徑索引搜尋 ---
         closest_idx = self._last_closest_idx
         if self.global_path:
@@ -215,46 +286,92 @@ class AGV:
         # 6. 任務完成判定
         dist_final = math.sqrt((self.x - self.target["x"])**2 + (self.y - self.target["y"])**2)
         if dist_final < 300:
-            if self.current_task:
+            if self.status in [AGVStatus.YIELDING, AGVStatus.EVADING]:
+                # 到達避讓點，進入等待狀態
+                self.status = AGVStatus.WAITING
+                self.wait_start_time = time.time() # 記錄開始等待時間
+                self.v = 0; self.omega = 0
+            elif self.current_task and self.status not in [AGVStatus.WAITING, AGVStatus.THINKING]:
+                # 只有在非避讓狀態下，才允許檢查是否到達任務工位
                 source_x = next((o["x"] for o in world.obstacles if o["id"] == self.current_task.get("source_id")), None)
                 source_y = next((o["y"] for o in world.obstacles if o["id"] == self.current_task.get("source_id")), None)
+                target_x = next((o["x"] for o in world.obstacles if o["id"] == self.current_task.get("target_id")), None)
+                target_y = next((o["y"] for o in world.obstacles if o["id"] == self.current_task.get("target_id")), None)
+
+                # 判定是到達取貨點還是卸貨點
                 is_at_source = (abs(self.target["x"] - source_x) < 10 and abs(self.target["y"] - source_y) < 10) if source_x else False
+                is_at_target = (abs(self.target["x"] - target_x) < 10 and abs(self.target["y"] - target_y) < 10) if target_x else False
+
                 if is_at_source and not self.has_goods:
                     self.status = AGVStatus.LOADING; self.task_timer = 5.0
-                else:
+                elif is_at_target and self.has_goods:
                     self.status = AGVStatus.UNLOADING; self.task_timer = 5.0
-                self.v = 0; self.omega = 0
-            else:
+                else:
+                    # 如果到達的地方既不是取貨點也不是卸貨點 (例如避讓點)
+                    # 且目前不是 IDLE，則應維持目前狀態或進入 WAITING
+                    if self.status != AGVStatus.IDLE:
+                        self.status = AGVStatus.WAITING
+                        self.wait_start_time = time.time()
+                self.v = 0; self.omega = 0; self.is_running = (self.status != AGVStatus.IDLE)
+            elif self.status not in [AGVStatus.WAITING, AGVStatus.YIELDING, AGVStatus.EVADING]:
+                # 只有在非任務、非避讓且非等待的情況下，才停止運行並轉為 IDLE
                 self.is_running = False; self.status = AGVStatus.IDLE; self.v = 0; self.omega = 0
         self.l_rpm, self.r_rpm = self.kinematics.velocity_to_rpm(self.v, self.omega)
 
     def check_proactive_evasion(self, world) -> bool:
-        # --- 關鍵修正 2：正在執行物流任務的車輛擁有最高優先權，不進行避讓 ---
-        if self.current_task is not None:
+        if self.status in [AGVStatus.EVADING, AGVStatus.YIELDING, AGVStatus.THINKING]:
             return False
-            
-        if self.status == AGVStatus.EVADING: return False
         
+        # --- 設備安全區保護：如果 AGV 還在設備中心附近（尚未完全出門），暫不觸發避讓 ---
+        if self.current_task:
+            source_ob = next((o for o in world.obstacles if o["id"] == self.current_task.get("source_id")), None)
+            if source_ob:
+                dist_to_source = math.sqrt((self.x - source_ob["x"])**2 + (self.y - source_ob["y"])**2)
+                # 距離起點設備中心 2.5 米內，視為「尚在設備內部/出門跑道上」
+                if dist_to_source < 2500:
+                    return False
+
+        my_prio = self.get_priority()
+        my_path = self.global_path[self._last_closest_idx : self._last_closest_idx + 100]
+        if not my_path: # 如果沒路徑，獲取當前位置作為佔用
+            my_path = [(self.x, self.y)]
+
         for other_id, other_agv in world.agvs.items():
             if other_id == self.id: continue
             
-            # 獲取其他車輛的規劃路徑投影
-            path_points = world.path_occupancy.get(other_id, [])
-            if not path_points: continue
+            other_path = world.path_occupancy.get(other_id, [])
+            if not other_path: continue
             
-            # --- 關鍵修正 1：擴大掃描範圍，實現「提前閃車」 ---
-            # 檢查對方前方 100 個路徑點 (約 20 米) 是否會經過我目前的位置
-            # 只要對方路徑會穿過我 2.5 米內，我就必須讓路
-            # 效能優化：使用平方距離避免 math.sqrt
-            for px, py in path_points[:100]: 
-                if (px - self.x)**2 + (py - self.y)**2 < 6250000: # 2500**2
-                    logger.info(f"AGV {self.id} is in the way of {other_id}'s path. Triggering proactive evasion.")
-                    self.trigger_evasion(world)
-                    return True
+            # 1. 偵測路徑衝突 (未來 100 點)
+            has_conflict = False
+            for mx, my in my_path:
+                for ox, oy in other_path[:100]:
+                    if (mx - ox)**2 + (my - oy)**2 < 6250000: # 2.5m
+                        has_conflict = True; break
+                if has_conflict: break
+            
+            if not has_conflict: continue
+
+            # 2. 優先級與 ID 仲裁
+            other_prio = other_agv.get_priority()
+            should_i_yield = False
+            
+            if my_prio > other_prio:
+                should_i_yield = True # 優先級低 (數字大) 的讓行
+            elif my_prio == other_prio:
+                if self.id < other_id:
+                    should_i_yield = True # 優先級相同，ID 小的讓行
+            
+            if should_i_yield:
+                logger.info(f"AGV {self.id} (Prio {my_prio}) yields to {other_id} (Prio {other_prio}). Conflict detected.")
+                self.status = AGVStatus.THINKING
+                self.trigger_evasion(world, other_id)
+                return True
+                
         return False
 
-    def trigger_evasion(self, world):
+    def trigger_evasion(self, world, other_id=None):
         if self.is_planning:
-            return # 已經在規劃中，不要再開啟新執行緒
+            return 
         all_obs = world.obstacles + world.get_dynamic_obstacles(exclude_agv_id=self.id)
-        threading.Thread(target=self._async_replan, args=(all_obs, world.static_costmap, world, self.status, True), daemon=True).start()
+        threading.Thread(target=self._async_replan, args=(all_obs, world.static_costmap, world, self.status, True, other_id), daemon=True).start()

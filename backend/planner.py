@@ -169,36 +169,42 @@ class AStarPlanner:
         if static_costmap is None: return None
         start_grid = (int(start_pos[0] // self.grid_size), int(start_pos[1] // self.grid_size))
         queue = [start_grid]; visited = {start_grid}
-        max_dist_grids = 15000 // self.grid_size 
+        # 擴大範圍至 30 米 (30000mm)
+        max_dist_grids = 30000 // self.grid_size 
         threat_grids = set()
-        r_grids = 2000 // self.grid_size
+        # 威脅半徑增加到 2.5 米
+        r_grids = 2500 // self.grid_size
         for path in threat_paths:
             for px, py in path:
                 tx, ty = int(px // self.grid_size), int(py // self.grid_size)
                 for dx in range(-int(r_grids), int(r_grids) + 1):
                     for dy in range(-int(r_grids), int(r_grids) + 1):
-                        if dx*dx + dy*dy <= r_grids**2: threat_grids.add((tx + dx, ty + dy))
+                        if dx*dx + dy*dy <= r_grids**2:
+                            threat_grids.add((tx + dx, ty + dy))
+        
         for stage in ["DIRECTED", "FULL"]:
             current_queue = list(queue); current_visited = set(visited)
             while current_queue:
                 gx, gy = current_queue.pop(0)
                 wx, wy = gx * self.grid_size, gy * self.grid_size
-                if static_costmap[gx, gy] < 1000000 and (gx, gy) not in threat_grids:
-                    if stage == "DIRECTED" and repulsion_vec:
-                        vx, vy = wx - start_pos[0], wy - start_pos[1]
-                        v_mag = math.sqrt(vx**2 + vy**2)
-                        if v_mag > 500:
-                            dot = (vx/v_mag) * repulsion_vec[0] + (vy/v_mag) * repulsion_vec[1]
-                            if dot < 0: continue
-                    is_footprint_safe = True
-                    for bx in range(-2, 3):
-                        for by in range(-2, 3):
-                            ix, iy = gx + bx, gy + by
-                            if not (0 <= ix < self.nodes_x and 0 <= iy < self.nodes_y) or static_costmap[ix, iy] >= 1000000:
-                                is_footprint_safe = False; break
-                        if not is_footprint_safe: break
-                    if is_footprint_safe:
-                        if (wx - start_pos[0])**2 + (wy - start_pos[1])**2 > 1000**2: return (wx, wy)
+                
+                # 檢查是否為安全點
+                if 0 <= gx < self.nodes_x and 0 <= gy < self.nodes_y:
+                    if static_costmap[gx, gy] < 1000000 and (gx, gy) not in threat_grids:
+                        # 檢查足跡安全 (5x5 grid)
+                        is_footprint_safe = True
+                        for bx in range(-2, 3):
+                            for by in range(-2, 3):
+                                ix, iy = gx + bx, gy + by
+                                if not (0 <= ix < self.nodes_x and 0 <= iy < self.nodes_y) or static_costmap[ix, iy] >= 1000000:
+                                    is_footprint_safe = False; break
+                            if not is_footprint_safe: break
+                        
+                        if is_footprint_safe:
+                            # 確保安全點距離當前位置至少 2 米 (2000mm)，避免分段移動
+                            if (wx - start_pos[0])**2 + (wy - start_pos[1])**2 > 2000**2:
+                                return (wx, wy)
+                
                 if abs(gx - start_grid[0]) < max_dist_grids and abs(gy - start_grid[1]) < max_dist_grids:
                     for dx, dy in [(0,1),(0,-1),(1,0),(-1,0)]:
                         nx, ny = gx + dx, gy + dy
