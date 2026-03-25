@@ -29,13 +29,15 @@ def get_priority(self):
 ## 4. 中繼點搜尋與閃避 (Yielding Behavior)
 被選定需閃避的 AGV 將執行以下動作：
 1. 狀態切換為 `THINKING`。
-2. 呼叫 `planner.find_nearest_safe_spot`，並將**對方的高優先級路徑**作為 `threat_paths` 傳入，確保找到的點不在對方未來的路徑上。
-3. 找到中繼安全點後，暫存原來的目標 `original_target`，將當前目標設為安全點。
-4. 狀態切換為 `YIELDING`，前往該點。
-5. 到達中繼點後，狀態切換為 `WAITING`。
+2. 呼叫 `planner.find_nearest_safe_spot`，搜尋範圍擴大至 **30 米 (30000mm)**，且安全點必須距離當前位置 **至少 2 米**，確保避讓一次到位。
+3. 將**對方的高優先級路徑**作為 `threat_paths` 傳入，確保找到的點不在對方未來的路徑上。
+4. 找到中繼安全點後，暫存原來的目標 `original_target`，將當前目標設為安全點。
+5. 狀態切換為 `YIELDING`，前往該點。
+6. 到達中繼點後，狀態切換為 `WAITING`。
 
 ## 5. 任務恢復機制 (Task Resumption)
 在 `WAITING` 狀態的更新迴圈中：
+- **強制冷卻期**：AGV 必須在 `WAITING` 狀態待滿 **15 秒** 後，才允許執行路徑衝突檢查與任務恢復，以防止頻繁重規劃導致的震盪。
 - 檢查 `world.path_occupancy[other_id]` 是否還與**我的原始目標路徑**發生重疊。
 - 如果不再重疊（代表對方已經通過或改變路徑）：
   - 狀態切換回 `PLANNING`。
