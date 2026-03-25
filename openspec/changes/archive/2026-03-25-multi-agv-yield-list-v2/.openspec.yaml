@@ -1,0 +1,5 @@
+schema_version: 1.0.0
+type: change
+name: multi-agv-yield-list
+status: proposed
+description: "將交管避讓邏輯從單一車輛擴展至多車讓路清單 (Yield List)，優化檢查頻率與恢復冷卻，以支援三台車以上的衝突處理。"

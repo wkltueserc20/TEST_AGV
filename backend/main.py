@@ -76,7 +76,8 @@ def process_commands():
     while not cmd_queue.empty():
         msg = cmd_queue.get_nowait()
         t = msg.get("type")
-        target_id = msg.get("agv_id")
+        # 增加容錯：從多個可能的地方讀取 ID
+        target_id = msg.get("agv_id") or msg.get("target_id") or msg.get("id")
         
         try:
             with world_lock:

@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Tuple, Optional
 from shapely.geometry import Point, box
 from shapely.affinity import rotate, translate
 
+from concurrent.futures import ProcessPoolExecutor
 from agv import AGV
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,9 @@ class World:
         self.reserved_havens: Dict[str, Tuple[float, float]] = {} 
         self.storage_file = "obstacles.json"
         self.agvs_storage_file = "agvs.json"
+        
+        # 多進程規劃器
+        self.executor = ProcessPoolExecutor(max_workers=4)
         
         self.grid_res = 200.0
         self.nx = int(width // self.grid_res)
