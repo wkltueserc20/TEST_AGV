@@ -30,7 +30,7 @@ const SimulatorCanvas: React.FC<Props> = ({
   const staticNeedsUpdate = useRef(true);
 
   const [dimensions, setDimensions] = useState({ width: 750, height: 750 });
-  const [viewState, setViewState] = useState({ zoom: 1.0, offsetX: 0, offsetY: 0 });
+  const [viewState, setViewState] = useState({ offsetX: 0, offsetY: 0 });
   
   const isDragging = useRef(false);
   const lastMousePos = useRef({ x: 0, y: 0 });
@@ -47,7 +47,10 @@ const SimulatorCanvas: React.FC<Props> = ({
   // 同步 Refs
   useEffect(() => { telemetryRef.current = telemetry; staticNeedsUpdate.current = true; }, [telemetry]);
   useEffect(() => { selectedAgvIdRef.current = selectedAgvId; }, [selectedAgvId]);
-  useEffect(() => { selectedObstacleIdRef.current = selectedObstacleId; }, [selectedObstacleId]);
+  useEffect(() => { 
+      selectedObstacleIdRef.current = selectedObstacleId; 
+      staticNeedsUpdate.current = true;
+  }, [selectedObstacleId]);
 
   // 處理畫布大小
   useEffect(() => {
@@ -64,31 +67,13 @@ const SimulatorCanvas: React.FC<Props> = ({
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // 滾輪縮放
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const handleWheelNative = (e: WheelEvent) => {
-      e.preventDefault();
-      const zoomSpeed = 0.15;
-      const direction = e.deltaY > 0 ? -1 : 1;
-      setViewState(prev => ({ 
-        ...prev, 
-        zoom: Math.min(Math.max(prev.zoom + direction * zoomSpeed * prev.zoom, 0.2), 20.0) 
-      }));
-      staticNeedsUpdate.current = true;
-    };
-    canvas.addEventListener('wheel', handleWheelNative, { passive: false });
-    return () => canvas.removeEventListener('wheel', handleWheelNative);
-  }, []);
-
   const worldToCanvas = useCallback((x: number, y: number, w: number, h: number, vs: any) => {
-    const scale = (w / MAP_SIZE) * vs.zoom;
+    const scale = (w / MAP_SIZE);
     return { cx: (x * scale) + vs.offsetX, cy: h - (y * scale) + vs.offsetY };
   }, []);
 
   const canvasToWorld = useCallback((cx: number, cy: number, w: number, h: number, vs: any) => {
-    const scale = (w / MAP_SIZE) * vs.zoom;
+    const scale = (w / MAP_SIZE);
     return { x: (cx - vs.offsetX) / scale, y: (h + vs.offsetY - cy) / scale };
   }, []);
 
@@ -128,12 +113,12 @@ const SimulatorCanvas: React.FC<Props> = ({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const scale = (w / MAP_SIZE) * vs.zoom;
+    const scale = (w / MAP_SIZE);
     ctx.fillStyle = '#0d0e12'; ctx.fillRect(0, 0, w, h);
 
     const pTopLeft = worldToCanvas(0, MAP_SIZE, w, h, vs);
     const pBottomRight = worldToCanvas(MAP_SIZE, 0, w, h, vs);
-    ctx.strokeStyle = '#2d333b'; ctx.lineWidth = Math.max(1, 2 * vs.zoom);
+    ctx.strokeStyle = '#2d333b'; ctx.lineWidth = 2;
     ctx.strokeRect(pTopLeft.cx, pTopLeft.cy, pBottomRight.cx - pTopLeft.cx, pBottomRight.cy - pTopLeft.cy);
 
     ctx.fillStyle = '#3a3f4b';
@@ -141,7 +126,7 @@ const SimulatorCanvas: React.FC<Props> = ({
       for (let y = 0; y <= MAP_SIZE; y += 5000) {
         const { cx, cy } = worldToCanvas(x, y, w, h, vs);
         if (cx >= 0 && cx <= w && cy >= 0 && cy <= h) {
-            ctx.beginPath(); ctx.arc(cx, cy, Math.max(0.1, 1.5 * vs.zoom), 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(cx, cy, 1.5, 0, Math.PI * 2); ctx.fill();
         }
       }
     }
@@ -149,22 +134,24 @@ const SimulatorCanvas: React.FC<Props> = ({
     if (telemetry) {
         telemetry.obstacles.filter(ob => ob.type !== 'equipment').forEach(ob => {
             const { cx, cy } = worldToCanvas(ob.x, ob.y, w, h, vs);
+            const isSelected = selectedObstacleIdRef.current === ob.id;
             ctx.save(); ctx.translate(cx, cy);
             if (ob.type === 'circle') {
-                const r = Math.max(0.1, (ob.radius || 500) * scale);
-                ctx.fillStyle = '#d4af37'; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
-                ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 1.5 * vs.zoom; ctx.stroke();
+                const r = (ob.radius || 500) * scale;
+                ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37'; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = isSelected ? '#fff' : '#ffd700'; ctx.lineWidth = 1.5; ctx.stroke();
             } else {
                 ctx.rotate(-ob.angle);
                 const ow = ob.width * scale, oh = ob.height * scale;
-                ctx.fillStyle = '#d4af37'; ctx.fillRect(-ow/2, -oh/2, ow, oh);
-                ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 1.5 * vs.zoom; ctx.strokeRect(-ow/2, -oh/2, ow, oh);
+                ctx.fillStyle = isSelected ? '#ff6600' : '#d4af37'; ctx.fillRect(-ow/2, -oh/2, ow, oh);
+                ctx.strokeStyle = isSelected ? '#fff' : '#ffd700'; ctx.lineWidth = 1.5; ctx.strokeRect(-ow/2, -oh/2, ow, oh);
             }
             ctx.restore();
         });
     }
     staticNeedsUpdate.current = false;
   };
+
 
   const render = useCallback(() => {
     const canvas = canvasRef.current;
@@ -180,7 +167,7 @@ const SimulatorCanvas: React.FC<Props> = ({
     if (!ctx) return;
 
     const now = performance.now();
-    const scale = (w / MAP_SIZE) * vs.zoom;
+    const scale = (w / MAP_SIZE);
 
     if (staticNeedsUpdate.current) updateStaticLayer(w, h, vs, currentTelemetry);
     if (staticCanvasRef.current) ctx.drawImage(staticCanvasRef.current, 0, 0);
@@ -228,14 +215,14 @@ const SimulatorCanvas: React.FC<Props> = ({
       const isSelected = a.id === selectedAgvIdRef.current;
       const { cx, cy } = worldToCanvas(a.target.x, a.target.y, w, h, vs);
       ctx.save(); ctx.translate(cx, cy);
-      const pulse = Math.max(0.1, (1 + Math.sin(now / 200) * 0.15) * vs.zoom);
-      ctx.strokeStyle = isSelected ? '#39ff14' : '#1b5e20'; ctx.lineWidth = 2 * vs.zoom;
+      const pulse = Math.max(0.1, (1 + Math.sin(now / 200) * 0.15));
+      ctx.strokeStyle = isSelected ? '#39ff14' : '#1b5e20'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(0, 0, 12 * pulse, 0, Math.PI * 2); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(-15*vs.zoom, 0); ctx.lineTo(15*vs.zoom, 0); ctx.moveTo(0, -15*vs.zoom); ctx.lineTo(0, 15*vs.zoom); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-15, 0); ctx.lineTo(15, 0); ctx.moveTo(0, -15); ctx.lineTo(0, 15); ctx.stroke();
       ctx.restore();
 
       if (isSelected && a.path) {
-        ctx.save(); ctx.setLineDash([5, 5]); ctx.strokeStyle = '#ff4d4d'; ctx.lineWidth = 2 * vs.zoom;
+        ctx.save(); ctx.setLineDash([5, 5]); ctx.strokeStyle = '#ff4d4d'; ctx.lineWidth = 2;
         ctx.shadowBlur = 10; ctx.shadowColor = '#ff4d4d'; ctx.beginPath();
         a.path.forEach((p, i) => {
           const cp = worldToCanvas(p[0], p[1], w, h, vs);
@@ -271,11 +258,11 @@ const SimulatorCanvas: React.FC<Props> = ({
             if (fromAgv && toAgv) {
                 const p1 = worldToCanvas(fromAgv.x, fromAgv.y, w, h, vs), p2 = worldToCanvas(toAgv.x, toAgv.y, w, h, vs);
                 ctx.save(); ctx.setLineDash([5, 5]); ctx.strokeStyle = link.type === 'WAITING' ? 'rgba(255, 152, 0, 0.6)' : 'rgba(187, 134, 252, 0.6)';
-                ctx.lineWidth = 2 * vs.zoom; ctx.beginPath(); ctx.moveTo(p1.cx, p1.cy); ctx.lineTo(p2.cx, p2.cy); ctx.stroke();
+                ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(p1.cx, p1.cy); ctx.lineTo(p2.cx, p2.cy); ctx.stroke();
                 const angle = Math.atan2(p2.cy - p1.cy, p2.cx - p1.cx);
-                ctx.translate(p2.cx - Math.cos(angle) * 30 * vs.zoom, p2.cy - Math.sin(angle) * 30 * vs.zoom);
+                ctx.translate(p2.cx - Math.cos(angle) * 30, p2.cy - Math.sin(angle) * 30);
                 ctx.rotate(angle); ctx.fillStyle = ctx.strokeStyle;
-                ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-10 * vs.zoom, -5 * vs.zoom); ctx.lineTo(-10 * vs.zoom, 5 * vs.zoom); ctx.fill();
+                ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-10, -5); ctx.lineTo(-10, 5); ctx.fill();
                 ctx.restore();
             }
         });
@@ -288,11 +275,11 @@ const SimulatorCanvas: React.FC<Props> = ({
             if (source && target) {
                 const p1 = worldToCanvas(source.x, source.y, w, h, vs), p2 = worldToCanvas(target.x, target.y, w, h, vs);
                 ctx.save(); ctx.setLineDash([8, 4]); ctx.strokeStyle = task.status === 'ASSIGNED' ? 'rgba(57, 255, 20, 0.4)' : 'rgba(88, 166, 255, 0.4)';
-                ctx.lineWidth = 2 * vs.zoom; ctx.beginPath(); ctx.moveTo(p1.cx, p1.cy); ctx.lineTo(p2.cx, p2.cy); ctx.stroke();
+                ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(p1.cx, p1.cy); ctx.lineTo(p2.cx, p2.cy); ctx.stroke();
                 const midX = (p1.cx + p2.cx) / 2, midY = (p1.cy + p2.cy) / 2;
                 ctx.fillStyle = task.status === 'ASSIGNED' ? '#39ff14' : '#58a6ff';
-                ctx.font = `bold ${Math.max(10, 11 * vs.zoom)}px monospace`; ctx.textAlign = 'center';
-                ctx.fillText(task.status, midX, midY - 5 * vs.zoom); ctx.restore();
+                ctx.font = `bold 11px monospace`; ctx.textAlign = 'center';
+                ctx.fillText(task.status, midX, midY - 5); ctx.restore();
             }
         });
     }
@@ -304,7 +291,7 @@ const SimulatorCanvas: React.FC<Props> = ({
       const sz = 1000 * scale;
       ctx.save(); ctx.translate(cx, cy); ctx.rotate(-ds.theta);
       let strokeColor = isSelected ? '#00f2ff' : '#555';
-      ctx.fillStyle = '#1a1a1a'; ctx.strokeStyle = strokeColor; ctx.lineWidth = 2 * vs.zoom;
+      ctx.fillStyle = '#1a1a1a'; ctx.strokeStyle = strokeColor; ctx.lineWidth = 2;
       const r = Math.max(0.1, 10 * scale);
       ctx.beginPath(); ctx.moveTo(-sz/2 + r, -sz/2); ctx.lineTo(sz/2 - r, -sz/2);
       ctx.quadraticCurveTo(sz/2, -sz/2, sz/2, -sz/2 + r); ctx.lineTo(sz/2, sz/2 - r);
@@ -313,18 +300,18 @@ const SimulatorCanvas: React.FC<Props> = ({
       ctx.quadraticCurveTo(-sz/2, -sz/2, -sz/2 + r, -sz/2); ctx.fill(); ctx.stroke();
       ctx.beginPath(); ctx.arc(0, 0, Math.max(0.1, sz/4), 0, Math.PI * 2); ctx.fillStyle = '#333'; ctx.fill();
       ctx.fillStyle = isSelected ? '#00f2ff' : '#aaa';
-      ctx.beginPath(); ctx.moveTo(sz/2 - 5*vs.zoom, 0); ctx.lineTo(sz/2 - 15*vs.zoom, -10*vs.zoom); ctx.lineTo(sz/2 - 15*vs.zoom, 10*vs.zoom); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(sz/2 - 5, 0); ctx.lineTo(sz/2 - 15, -10); ctx.lineTo(sz/2 - 15, 10); ctx.fill();
       const ledColor = a.is_running ? '#00ff00' : (a.is_planning ? '#ffc107' : '#ff3333');
-      ctx.beginPath(); ctx.arc(-sz/2 + 15*vs.zoom, -sz/2 + 15*vs.zoom, Math.max(0.1, 4*vs.zoom), 0, Math.PI * 2);
+      ctx.beginPath(); ctx.arc(-sz/2 + 15, -sz/2 + 15, 4, 0, Math.PI * 2);
       ctx.fillStyle = ledColor; ctx.shadowBlur = 8; ctx.shadowColor = ledColor; ctx.fill();
       ctx.shadowBlur = 0;
       if (a.has_goods) {
-          ctx.fillStyle = '#ff9800'; ctx.strokeStyle = '#e65100'; ctx.lineWidth = 1 * vs.zoom;
+          ctx.fillStyle = '#ff9800'; ctx.strokeStyle = '#e65100'; ctx.lineWidth = 1;
           const cargoSize = sz * 0.4; ctx.fillRect(-cargoSize/2, -cargoSize/2, cargoSize, cargoSize);
           ctx.strokeRect(-cargoSize/2, -cargoSize/2, cargoSize, cargoSize);
       }
       ctx.restore();
-      ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(8, 11 * vs.zoom)}px monospace`;
+      ctx.fillStyle = '#fff'; ctx.font = `bold 11px monospace`;
       ctx.textAlign = 'center';
       ctx.fillText(a.id, cx, cy - sz * 0.75);
       
@@ -336,7 +323,7 @@ const SimulatorCanvas: React.FC<Props> = ({
       };
       const emoji = statusEmojis[a.status] || '❓';
       ctx.fillStyle = a.status === 'STUCK' ? '#ff3333' : '#aaa';
-      ctx.font = `${Math.max(7, 9 * vs.zoom)}px monospace`;
+      ctx.font = `9px monospace`;
       ctx.fillText(`${emoji} ${a.status}`, cx, cy + sz * 0.75);
     });
 
@@ -350,7 +337,7 @@ const SimulatorCanvas: React.FC<Props> = ({
       ctx.save(); ctx.translate(cx, cy);
       const iconScale = size / 50; ctx.scale(iconScale, iconScale);
       ctx.globalAlpha = 0.7; ctx.fillStyle = (isSelected || isAutoSource) ? '#ff6600' : baseColor;
-      ctx.fill(stationPath2D); ctx.globalAlpha = 1.0; ctx.strokeStyle = '#fff'; ctx.lineWidth = (1.5 * vs.zoom) / iconScale;
+      ctx.fill(stationPath2D); ctx.globalAlpha = 1.0; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5 / iconScale;
       ctx.stroke(stationPath2D); ctx.beginPath(); ctx.arc(0, 0, 5 / iconScale, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
       if (ob.has_goods) {
           ctx.fillStyle = '#ff9800'; ctx.strokeStyle = '#e65100'; ctx.lineWidth = 1 / iconScale;
@@ -359,10 +346,10 @@ const SimulatorCanvas: React.FC<Props> = ({
       ctx.restore();
       if (ob.docking_angle !== undefined) {
           ctx.save(); ctx.translate(cx, cy); const angleRad = (ob.docking_angle * Math.PI) / 180; ctx.rotate(-angleRad + Math.PI);
-          ctx.strokeStyle = '#00f2ff'; ctx.lineWidth = 2 * vs.zoom; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(size * 0.8, 0);
+          ctx.strokeStyle = '#00f2ff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(size * 0.8, 0);
           ctx.lineTo(size * 0.6, -size * 0.1); ctx.moveTo(size * 0.8, 0); ctx.lineTo(size * 0.6, size * 0.1); ctx.stroke(); ctx.restore();
       }
-      ctx.save(); ctx.translate(cx, cy); ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(10, 12 * vs.zoom)}px monospace`; ctx.textAlign = 'center'; ctx.fillText(ob.id, 0, -size - 10 * vs.zoom); ctx.restore();
+      ctx.save(); ctx.translate(cx, cy); ctx.fillStyle = '#fff'; ctx.font = `bold 12px monospace`; ctx.textAlign = 'center'; ctx.fillText(ob.id, 0, -size - 10); ctx.restore();
     });
 
     animationFrameId.current = requestAnimationFrame(render);
@@ -394,7 +381,7 @@ const SimulatorCanvas: React.FC<Props> = ({
         onDoubleClick={(e) => handleInteraction(e, onCanvasDoubleClick)}
         onContextMenu={(e) => { e.preventDefault(); handleInteraction(e, onCanvasRightClick); }} 
       />
-      <button style={{ position: 'absolute', bottom: '20px', right: '20px', opacity: 0.6 }} onClick={() => { setViewState({ zoom: 1, offsetX: 0, offsetY: 0 }); staticNeedsUpdate.current = true; }}>
+      <button style={{ position: 'absolute', bottom: '20px', right: '20px', opacity: 0.6 }} onClick={() => { setViewState({ offsetX: 0, offsetY: 0 }); staticNeedsUpdate.current = true; }}>
         RESET VIEW
       </button>
     </div>
