@@ -111,6 +111,11 @@ def process_commands():
                         # 如果車輛處於暫停 (is_running=False)，則清空任務
                         if not a.is_running:
                             a.current_task = None; a.status = "IDLE"; a.global_path = []
+                elif t == "set_all_speeds":
+                    new_speed = float(msg.get("data", 3000))
+                    for agv in world.agvs.values():
+                        agv.max_rpm = new_speed
+                    world.save_agvs()
                 elif target_id and target_id in world.agvs:
                     a = world.agvs[target_id]
                     if t == "start": a.is_running = True; a.replan_needed = True
@@ -119,18 +124,22 @@ def process_commands():
                     elif t == "reset":
                         a.x, a.y, a.theta = 5000.0, 5000.0, 0.0
                         a.v, a.omega = 0.0, 0.0; a.is_running = False; a.global_path = []
+                        if a.current_travel_time > 0: a.last_travel_time = a.current_travel_time; a.current_travel_time = 0
                     elif t == "force_idle":
                         # 強制設為 IDLE，清空任務與路徑，但不改變當前位置
                         a.v, a.omega = 0.0, 0.0
                         a.status = "IDLE"; a.is_running = False
                         a.current_task = None; a.global_path = []; a.yielding_to_id = None
                         a.original_target = None; a.replan_needed = False
+                        if a.current_travel_time > 0: a.last_travel_time = a.current_travel_time; a.current_travel_time = 0
                     elif t == "set_target": a.target = msg.get("data"); a.replan_needed = True
                     elif t == "set_speed": a.max_rpm = float(msg.get("data", 3000))
                 
-                # 任何變動後觸發重新規劃
+                # 任何變動後觸發重新規劃 (僅針對正在運行的 AGV)
                 if t in ["add_obstacle", "update_obstacle", "clear_obstacles", "remove_obstacle"]:
-                    for a in world.agvs.values(): a.replan_needed = True
+                    for a in world.agvs.values():
+                        if a.is_running:
+                            a.replan_needed = True
         except Exception as e:
             logger.error(f"Command Error ({t}): {e}")
 

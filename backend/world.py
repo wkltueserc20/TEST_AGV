@@ -110,15 +110,21 @@ class World:
             "target_id": target_id,
             "agv_id": agv_id, # 新增：可選的預指派車輛
             "status": "WAITING",
-            "created_at": time.time()
+            "created_at": time.time(),
+            "execution_time": 0.0
         }
         self.task_queue.append(task)
         logger.info(f"New mission queued: {task_id}")
 
     def get_task_queue(self) -> List[Dict[str, Any]]:
+        # 即時更新執行中的任務耗時
+        for task in self.task_queue:
+            if task["status"] == "ASSIGNED" and task.get("agv_id") in self.agvs:
+                agv = self.agvs[task["agv_id"]]
+                task["execution_time"] = agv.current_travel_time
         return self.task_queue
 
-    def complete_task(self, source_id: str, target_id: str):
+    def complete_task(self, source_id: str, target_id: str, execution_time: float = 0.0):
         """將任務標記為完成並移至歷史紀錄"""
         target_task = None
         for i, t in enumerate(self.task_queue):
@@ -132,6 +138,7 @@ class World:
         if target_task:
             target_task["status"] = "COMPLETED"
             target_task["completed_at"] = time.time()
+            target_task["execution_time"] = execution_time
             self.task_history.insert(0, target_task)
             if len(self.task_history) > 20: self.task_history.pop()
             logger.info(f"Task completed: {target_task['id']}")

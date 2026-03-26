@@ -1969,7 +1969,7 @@
     "radius": 1000,
     "status": "running",
     "docking_angle": 180,
-    "has_goods": true
+    "has_goods": false
   },
   {
     "id": "EQP-TF47",
@@ -2009,7 +2009,7 @@
     "radius": 1000,
     "status": "running",
     "docking_angle": 0,
-    "has_goods": false
+    "has_goods": true
   },
   {
     "id": "EQP-6NUZ",
@@ -2038,6 +2038,25 @@
     "radius": 1000,
     "status": "running",
     "docking_angle": 0,
+    "has_goods": false
+  },
+  {
+    "id": "EQP-65OA",
+    "type": "equipment",
+    "x": 2500,
+    "y": 3500,
+    "radius": 1000,
+    "status": "running",
+    "docking_angle": 180,
     "has_goods": true
+  },
+  {
+    "id": "ob-1774501897194-4y6fj",
+    "type": "rectangle",
+    "x": 8500,
+    "y": 47500,
+    "width": 1000,
+    "height": 1000,
+    "angle": 0
   }
 ]

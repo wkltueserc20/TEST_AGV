@@ -24,6 +24,7 @@ function App() {
   const [addAgvMode, setAddAgvMode] = useState(false);
   const [activeTool, setActiveTool] = useState<ToolMode>('SELECT');
   const [showSearch, setShowSearch] = useState(true);
+  const [globalRpm, setGlobalRpm] = useState(3000);
 
   // 本地緩衝狀態
   const [localObFields, setLocalObFields] = useState({ id: "", x: 0, y: 0, angle: 0 });
@@ -130,6 +131,12 @@ function App() {
     let deg = (rad * 180) / Math.PI;
     while (deg < 0) deg += 360;
     return Math.round(deg % 360);
+  };
+
+  const formatSimTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}分${secs.toString().padStart(2, '0')}秒`;
   };
 
   // 輔助：檢查站點是否被鎖定
@@ -337,6 +344,20 @@ function App() {
             <input type="checkbox" id="show-search" checked={showSearch} onChange={(e) => setShowSearch(e.target.checked)} />
             <label htmlFor="show-search" style={{ fontSize: '11px', color: '#8b949e', cursor: 'pointer' }}>Search Debug Layer</label>
           </div>
+          <div style={{ marginTop: '15px', borderTop: '1px solid #30363d', paddingTop: '12px' }}>
+            <label style={{ fontSize: '10px', color: '#8b949e', display: 'block', marginBottom: '5px' }}>GLOBAL SPEED LIMIT: {globalRpm} RPM</label>
+            <input 
+              type="range" 
+              min="0" max="3000" step="100" 
+              value={globalRpm} 
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                setGlobalRpm(val);
+                sendCommand('set_all_speeds', { data: val });
+              }} 
+              style={{ width: '100%', accentColor: '#ff9800' }} 
+            />
+          </div>
         </div>
 
         <div className="section">
@@ -345,7 +366,12 @@ function App() {
             {telemetry?.agvs.map(a => (
               <div key={a.id} className={`item-card ${selectedAgvId === a.id ? 'active' : ''}`} onClick={() => { setSelectedAgvId(a.id); setSelectedObId(null); }}>
                 <div className="item-header">
-                  <span>{a.id} {a.has_goods ? '📦' : ''}</span>
+                  <div style={{ display: 'flex', flexDirection: 'column' }}>
+                    <span style={{ fontWeight: 'bold' }}>{a.id} {a.has_goods ? '📦' : ''}</span>
+                    {a.is_running && a.current_travel_time !== undefined && (
+                      <span style={{ fontSize: '10px', color: '#39ff14' }}>⏱️ {formatSimTime(a.current_travel_time)}</span>
+                    )}
+                  </div>
                   <span style={{ fontSize: '10px', fontWeight: 'bold', color: a.status === 'EXECUTING' ? '#39ff14' : a.status === 'PLANNING' ? '#ffc107' : a.status === 'EVADING' ? '#bb86fc' : a.status === 'STUCK' ? '#ff4d4d' : '#8b949e' }}>
                     {a.status}
                   </span>
@@ -354,6 +380,11 @@ function App() {
                   <button style={{ flex: 1, fontSize: '9px', padding: '4px 2px', background: '#30363d', color: '#c9d1d9', border: '1px solid #444' }} onClick={(e) => { e.stopPropagation(); sendCommand('force_idle', { target_id: a.id }); }}>FORCE IDLE</button>
                   <button style={{ flex: 1, fontSize: '9px', padding: '4px 2px', background: '#30363d', color: '#c9d1d9', border: '1px solid #444' }} onClick={(e) => { e.stopPropagation(); sendCommand(a.is_running ? 'pause' : 'start', { target_id: a.id }); }}>{a.is_running ? 'PAUSE' : 'START'}</button>
                 </div>
+                {a.last_travel_time !== undefined && a.last_travel_time > 0 && (
+                  <div style={{ marginTop: '6px', fontSize: '9px', color: '#8b949e', borderTop: '1px solid #30363d', paddingTop: '4px' }}>
+                    上一次行走: {formatSimTime(a.last_travel_time)}
+                  </div>
+                )}
               </div>
             ))}
 
@@ -417,12 +448,8 @@ function App() {
 
         {selectedAgv && (
           <div className="section" style={{ borderTop: '1px solid #30363d', paddingTop: '15px' }}>
-            <h3>AGV Limits: {selectedAgv.id}</h3>
-            <div style={{ marginTop: '5px' }}>
-              <label style={{ fontSize: '10px', color: '#8b949e' }}>DRIVE LIMIT: {selectedAgv.max_rpm} RPM</label>
-              <input type="range" disabled={!MODE_PERMISSIONS[activeTool].canEdit} min="0" max="3000" step="100" value={selectedAgv.max_rpm} onChange={(e) => sendCommand('set_speed', { agv_id: selectedAgvId, data: parseInt(e.target.value) })} style={{ width: '100%', accentColor: '#58a6ff' }} />
-            </div>
-            {MODE_PERMISSIONS[activeTool].canAdd === 'EQUIPMENT' && <button className="danger" style={{ width: '100%', marginTop: '20px', opacity: 0.6 }} onClick={() => sendCommand('remove_agv', { agv_id: selectedAgvId })}>REMOVE AGV</button>}
+            <h3>AGV Actions: {selectedAgv.id}</h3>
+            {MODE_PERMISSIONS[activeTool].canAdd === 'EQUIPMENT' && <button className="danger" style={{ width: '100%', marginTop: '5px', opacity: 0.6 }} onClick={() => sendCommand('remove_agv', { agv_id: selectedAgvId })}>REMOVE AGV</button>}
           </div>
         )}
 
@@ -476,6 +503,8 @@ function App() {
                   sendCommand('set_target', { agv_id: targetId, data: { x: targetX, y: targetY } });
               } else if (perm === 'CANCEL_TASK') {
                   setAutoTaskSource(null);
+                  setSelectedAgvId(null);
+                  setSelectedObId(null);
               } else if (perm === 'CANCEL_SELECT') {
                   setSelectedAgvId(null);
                   setSelectedObId(null);
@@ -518,7 +547,12 @@ function App() {
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontSize: '9px', padding: '2px 4px', borderRadius: '4px', background: t.status === 'ASSIGNED' ? 'rgba(57, 255, 20, 0.1)' : 'rgba(139, 148, 158, 0.1)', color: t.status === 'ASSIGNED' ? '#39ff14' : '#8b949e' }}>{t.status}</span>
-                    {t.agv_id && <div style={{ fontSize: '9px', color: '#58a6ff' }}>車輛: {t.agv_id}</div>}
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                        {t.agv_id && <div style={{ fontSize: '9px', color: '#58a6ff' }}>車輛: {t.agv_id}</div>}
+                        {t.execution_time !== undefined && t.execution_time > 0 && (
+                            <div style={{ fontSize: '9px', color: '#39ff14' }}>⏱️ {formatSimTime(t.execution_time)}</div>
+                        )}
+                    </div>
                 </div>
               </div>
             )) : <div style={{ textAlign: 'center', padding: '10px', color: '#8b949e', fontSize: '11px' }}>目前無等待中任務</div>}
@@ -532,7 +566,12 @@ function App() {
               <div key={t.id} className="item-card" style={{ padding: '8px', opacity: 0.8, marginBottom: '6px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontSize: '10px', color: '#8b949e' }}>{t.source_id || 'AGV'} ➔ {t.target_id || 'AGV'}</span>
-                    <span style={{ fontSize: '9px', color: '#39ff14', fontWeight: 'bold' }}>✓ DONE</span>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                        <span style={{ fontSize: '9px', color: '#39ff14', fontWeight: 'bold' }}>✓ DONE</span>
+                        {t.execution_time !== undefined && (
+                            <div style={{ fontSize: '8px', color: '#8b949e' }}>耗時: {formatSimTime(t.execution_time)}</div>
+                        )}
+                    </div>
                 </div>
                 {t.agv_id && <div style={{ fontSize: '8px', color: '#58a6ff', marginTop: '2px' }}>執行車輛: {t.agv_id}</div>}
               </div>

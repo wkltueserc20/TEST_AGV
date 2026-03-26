@@ -12,6 +12,8 @@ export interface AGVData {
   visited?: [number, number][];
   culprit_id?: string;
   evasion_target?: { x: number; y: number };
+  current_travel_time?: number;
+  last_travel_time?: number;
 }
 
 export interface SocialLink {

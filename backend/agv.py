@@ -63,6 +63,10 @@ class AGV:
         self.task_timer = 0.0
         self._last_closest_idx = 0
         
+        # 模擬時間追蹤
+        self.current_travel_time = 0.0
+        self.last_travel_time = 0.0
+        
         # Traffic Control 擴充
         self.original_target: Optional[Dict[str, float]] = None
         self.yielding_to_ids: set[str] = set()
@@ -100,7 +104,9 @@ class AGV:
             "visited": self.visited_nodes if not self.is_running else [],
             "max_rpm": self.max_rpm, "culprit_id": self.culprit_id,
             "evasion_target": self.evasion_target, "current_task": self.current_task,
-            "yielding_to_ids": list(self.yielding_to_ids)
+            "yielding_to_ids": list(self.yielding_to_ids),
+            "current_travel_time": self.current_travel_time,
+            "last_travel_time": self.last_travel_time
         }
 
     def _on_planning_done(self, future):
@@ -178,6 +184,9 @@ class AGV:
             future.add_done_callback(self._on_planning_done)
 
     def update(self, dt: float, world):
+        if self.is_running:
+            self.current_travel_time += dt
+
         if self.status in [AGVStatus.LOADING, AGVStatus.UNLOADING, AGVStatus.WAITING, AGVStatus.THINKING, AGVStatus.STUCK]:
             self.v = 0; self.omega = 0; self.target_v = 0; self.target_omega = 0
             self.l_rpm, self.r_rpm = 0, 0
@@ -225,18 +234,25 @@ class AGV:
                             if tid:
                                 target_ob = next((o for o in world.obstacles if o["id"] == tid), None)
                                 if target_ob: self.target = {"x": target_ob["x"], "y": target_ob["y"]}; self.status = AGVStatus.EXECUTING; self.is_running = True; self.replan_needed = True
-                                else: world.complete_task(self.current_task["source_id"], None); self.status = AGVStatus.IDLE; self.is_running = False; self.current_task = None
-                            else: world.complete_task(self.current_task["source_id"], None); self.status = AGVStatus.IDLE; self.is_running = False; self.current_task = None
+                                else: 
+                                    world.complete_task(self.current_task["source_id"], None, execution_time=self.current_travel_time)
+                                    self.last_travel_time = self.current_travel_time; self.current_travel_time = 0.0
+                                    self.status = AGVStatus.IDLE; self.is_running = False; self.current_task = None
+                            else: 
+                                world.complete_task(self.current_task["source_id"], None, execution_time=self.current_travel_time)
+                                self.last_travel_time = self.current_travel_time; self.current_travel_time = 0.0
+                                self.status = AGVStatus.IDLE; self.is_running = False; self.current_task = None
                     else:
                         self.has_goods = False
                         if self.current_task:
                             target_ob = next((o for o in world.obstacles if o["id"] == self.current_task["target_id"]), None)
                             if target_ob: target_ob["has_goods"] = True; world.save_obstacles()
-                            world.complete_task(self.current_task.get("source_id"), self.current_task["target_id"])
+                            world.complete_task(self.current_task.get("source_id"), self.current_task["target_id"], execution_time=self.current_travel_time)
+                        self.last_travel_time = self.current_travel_time; self.current_travel_time = 0.0
                         self.status = AGVStatus.IDLE; self.is_running = False; self.current_task = None
             return
 
-        if self.replan_needed and not self.is_planning:
+        if self.replan_needed and self.is_running and not self.is_planning:
             all_obs = world.obstacles + world.get_dynamic_obstacles(exclude_agv_id=self.id)
             self._async_replan(all_obs, world.static_costmap, world)
 
@@ -317,6 +333,7 @@ class AGV:
                 
                 self.v = 0; self.omega = 0; self.is_running = (self.status != AGVStatus.IDLE)
             elif self.status not in [AGVStatus.WAITING, AGVStatus.YIELDING, AGVStatus.EVADING]:
+                if self.current_travel_time > 0: self.last_travel_time = self.current_travel_time; self.current_travel_time = 0.0
                 self.is_running = False; self.status = AGVStatus.IDLE; self.v = 0; self.omega = 0
         self.l_rpm, self.r_rpm = self.kinematics.velocity_to_rpm(self.v, self.omega)
 
