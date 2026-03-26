@@ -1,8 +1,8 @@
 ## 1. Backend Optimization & Synchronization
 
-- [ ] 1.1 Update `AGV.to_dict()` in `backend/agv.py` to remove the condition that hides `visited` nodes when `is_running` is true.
-- [ ] 1.2 Implement sparse sampling logic in `to_dict()` to take every 5th node from `self.visited_nodes`.
-- [ ] 1.3 Implement a hard cap of 1000 nodes for the sampled `visited` list in `to_dict()` to optimize bandwidth.
+- [x] 1.1 Update `AGV.to_dict()` in `backend/agv.py` to remove the condition that hides `visited` nodes when `is_running` is true.
+- [x] 1.2 Implement sparse sampling logic in `to_dict()` to take every 5th node from `self.visited_nodes`.
+- [x] 1.3 Implement a hard cap of 1000 nodes for the sampled `visited` list in `to_dict()` to optimize bandwidth.
 
 ## 2. Verification & Validation
 

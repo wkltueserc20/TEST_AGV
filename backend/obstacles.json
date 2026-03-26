@@ -1929,7 +1929,7 @@
     "y": 42500,
     "radius": 1000,
     "status": "running",
-    "has_goods": true,
+    "has_goods": false,
     "docking_angle": 0
   },
   {
@@ -1940,7 +1940,7 @@
     "radius": 1000,
     "status": "running",
     "docking_angle": 180,
-    "has_goods": false
+    "has_goods": true
   },
   {
     "id": "EQP-Z20Z",
@@ -1989,7 +1989,7 @@
     "radius": 1000,
     "status": "running",
     "docking_angle": 270,
-    "has_goods": false
+    "has_goods": true
   },
   {
     "id": "EQP-8CL7",
@@ -2009,7 +2009,7 @@
     "radius": 1000,
     "status": "running",
     "docking_angle": 0,
-    "has_goods": true
+    "has_goods": false
   },
   {
     "id": "EQP-6NUZ",
@@ -2038,7 +2038,7 @@
     "radius": 1000,
     "status": "running",
     "docking_angle": 0,
-    "has_goods": false
+    "has_goods": true
   },
   {
     "id": "EQP-65OA",
@@ -2048,7 +2048,7 @@
     "radius": 1000,
     "status": "running",
     "docking_angle": 180,
-    "has_goods": true
+    "has_goods": false
   },
   {
     "id": "ob-1774501897194-4y6fj",

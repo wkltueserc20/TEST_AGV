@@ -301,7 +301,7 @@ const SimulatorCanvas: React.FC<Props> = ({
       ctx.beginPath(); ctx.arc(0, 0, Math.max(0.1, sz/4), 0, Math.PI * 2); ctx.fillStyle = '#333'; ctx.fill();
       ctx.fillStyle = isSelected ? '#00f2ff' : '#aaa';
       ctx.beginPath(); ctx.moveTo(sz/2 - 5, 0); ctx.lineTo(sz/2 - 15, -10); ctx.lineTo(sz/2 - 15, 10); ctx.fill();
-      const ledColor = a.is_running ? '#00ff00' : (a.is_planning ? '#ffc107' : '#ff3333');
+      const ledColor = a.status === 'ERROR' ? '#ff0000' : (a.is_running ? '#00ff00' : (a.is_planning || a.status === 'BLOCKED' ? '#ffc107' : '#ff3333'));
       ctx.beginPath(); ctx.arc(-sz/2 + 15, -sz/2 + 15, 4, 0, Math.PI * 2);
       ctx.fillStyle = ledColor; ctx.shadowBlur = 8; ctx.shadowColor = ledColor; ctx.fill();
       ctx.shadowBlur = 0;
@@ -319,10 +319,11 @@ const SimulatorCanvas: React.FC<Props> = ({
       const statusEmojis: Record<string, string> = {
         'IDLE': '💤', 'PLANNING': '🔄', 'EXECUTING': '🚚', 'EVADING': '🛡️', 
         'STUCK': '⚠️', 'LOADING': '📥', 'UNLOADING': '📤',
-        'WAITING': '⏸️', 'THINKING': '🧠', 'YIELDING': '🛡️'
+        'WAITING': '⏸️', 'THINKING': '🧠', 'YIELDING': '🛡️',
+        'BLOCKED': '🚧', 'ERROR': '❌'
       };
       const emoji = statusEmojis[a.status] || '❓';
-      ctx.fillStyle = a.status === 'STUCK' ? '#ff3333' : '#aaa';
+      ctx.fillStyle = (a.status === 'STUCK' || a.status === 'ERROR') ? '#ff3333' : '#aaa';
       ctx.font = `9px monospace`;
       ctx.fillText(`${emoji} ${a.status}`, cx, cy + sz * 0.75);
     });

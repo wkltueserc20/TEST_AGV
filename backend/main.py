@@ -118,8 +118,12 @@ def process_commands():
                     world.save_agvs()
                 elif target_id and target_id in world.agvs:
                     a = world.agvs[target_id]
-                    if t == "start": a.is_running = True; a.replan_needed = True
-                    elif t == "pause": a.is_running = False
+                    if t == "start": 
+                        logger.info(f"Command START received for AGV {target_id}")
+                        a.is_running = True; a.replan_needed = True
+                    elif t == "pause": 
+                        logger.info(f"Command PAUSE received for AGV {target_id}")
+                        a.is_running = False
                     elif t == "remove_agv": del world.agvs[target_id]; world.save_agvs()
                     elif t == "reset":
                         a.x, a.y, a.theta = 5000.0, 5000.0, 0.0

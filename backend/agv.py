@@ -22,6 +22,8 @@ class AGVStatus(str, Enum):
     WAITING = "WAITING"
     THINKING = "THINKING"
     YIELDING = "YIELDING"
+    BLOCKED = "BLOCKED"
+    ERROR = "ERROR"
 
 class AGVMode(str, Enum):
     SIMULATION = "SIMULATION"
@@ -45,6 +47,7 @@ class AGV:
         
         self.max_rpm = 3000.0
         self.replan_needed = True
+        self.retry_count = 0
         self.culprit_id = None 
         self.wait_start_time = None
         self.stuck_start_time = None 
@@ -86,13 +89,17 @@ class AGV:
             self.replan_needed = False
 
     def get_priority(self, world=None) -> int:
+        if self.status in [AGVStatus.LOADING, AGVStatus.UNLOADING]:
+            return 0
         if self.current_task and world:
             source_ob = next((o for o in world.obstacles if o["id"] == self.current_task.get("source_id")), None)
             if source_ob:
                 dist_sq = (self.x - source_ob["x"])**2 + (self.y - source_ob["y"])**2
                 if dist_sq < 2500**2: return 0 
-        if not self.current_task: return 100
-        return self.current_task.get("priority", 5)
+            return self.current_task.get("priority", 5)
+        if self.is_running or self.status in [AGVStatus.EXECUTING, AGVStatus.PLANNING]:
+            return 50
+        return 100
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -101,7 +108,7 @@ class AGV:
             "target": self.target, "status": self.status, "mode": self.mode, "has_goods": self.has_goods,
             "is_running": self.is_running, "is_planning": self.is_planning,
             "path": self.global_path, 
-            "visited": self.visited_nodes if not self.is_running else [],
+            "visited": self.visited_nodes,
             "max_rpm": self.max_rpm, "culprit_id": self.culprit_id,
             "evasion_target": self.evasion_target, "current_task": self.current_task,
             "yielding_to_ids": list(self.yielding_to_ids),
@@ -112,11 +119,12 @@ class AGV:
     def _on_planning_done(self, future):
         try:
             res = future.result()
-            if res:
+            if res and res[0]: # 檢查路徑是否非空
                 path, visited = res
                 self.global_path = path
                 self._last_closest_idx = 0
                 self.visited_nodes = visited
+                self.retry_count = 0
                 
                 # 如果是正在避讓中，保持 YIELDING
                 if self.status == AGVStatus.THINKING:
@@ -130,16 +138,23 @@ class AGV:
                 elif self.status in [AGVStatus.YIELDING, AGVStatus.WAITING]:
                     self.is_running = True
             else:
-                # 規劃失敗處理
-                if self.status == AGVStatus.THINKING:
-                    logger.warning(f"AGV {self.id} evasion path failed. Retrying in WAITING.")
-                    self.status = AGVStatus.WAITING
-                    self.wait_start_time = time.time()
-                elif self.status == AGVStatus.PLANNING:
+                # 規劃失敗處理 (可能是暫時性阻塞)
+                if self.status in [AGVStatus.PLANNING, AGVStatus.THINKING]:
+                    if self.retry_count < 3:
+                        logger.warning(f"AGV {self.id} path failed. Entering BLOCKED (retry {self.retry_count + 1}/3)")
+                        self.status = AGVStatus.BLOCKED
+                        self.retry_count += 1
+                        self.wait_start_time = time.time()
+                    else:
+                        logger.error(f"AGV {self.id} path failed after maximum retries. Entering ERROR.")
+                        self.status = AGVStatus.ERROR
+                        self.retry_count = 0 
+                else:
                     self.status = AGVStatus.STUCK
         except Exception as e:
             logger.error(f"Planning Future Error: {e}")
-            self.status = AGVStatus.STUCK
+            self.status = AGVStatus.ERROR
+            self.retry_count = 0
         finally:
             self.is_planning = False; self.replan_needed = False
 
@@ -187,7 +202,7 @@ class AGV:
         if self.is_running:
             self.current_travel_time += dt
 
-        if self.status in [AGVStatus.LOADING, AGVStatus.UNLOADING, AGVStatus.WAITING, AGVStatus.THINKING, AGVStatus.STUCK]:
+        if self.status in [AGVStatus.LOADING, AGVStatus.UNLOADING, AGVStatus.WAITING, AGVStatus.THINKING, AGVStatus.STUCK, AGVStatus.BLOCKED, AGVStatus.ERROR]:
             self.v = 0; self.omega = 0; self.target_v = 0; self.target_omega = 0
             self.l_rpm, self.r_rpm = 0, 0
             
@@ -195,6 +210,14 @@ class AGV:
                 if not self.current_task:
                     self.status = AGVStatus.IDLE; self.is_running = False; self.yielding_to_ids = set(); self.original_target = None; return
             
+            if self.status == AGVStatus.BLOCKED:
+                if self.wait_start_time and (time.time() - self.wait_start_time > 2.0):
+                    self.replan_needed = True
+                    # 立即觸發規劃，不要等下一幀的物理迴圈
+                    all_obs = world.obstacles + world.get_dynamic_obstacles(exclude_agv_id=self.id)
+                    self._async_replan(all_obs, world.static_costmap, world)
+                    return
+
             if self.status == AGVStatus.WAITING:
                 if self.yielding_to_ids:
                     current_time = time.time()
@@ -359,7 +382,7 @@ class AGV:
                 if has_conflict: break
             if not has_conflict: continue
             other_prio = other_agv.get_priority(world)
-            should_i_yield = (my_prio > other_prio) or (my_prio == other_prio and self.id < other_id)
+            should_i_yield = (my_prio > other_prio) or (my_prio == other_prio and self.id > other_id)
             if should_i_yield: conflict_ids.add(other_id)
         if conflict_ids: self.status = AGVStatus.THINKING; self.trigger_evasion(world, conflict_ids); return True
         return False
